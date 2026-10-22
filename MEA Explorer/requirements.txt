@@ -1,0 +1,4 @@
+# The only thing the raster viewer adds to the shared MEA .venv.
+# That venv already provides a Qt binding (PyQt5) and the scientific stack
+# (numpy, scipy, h5py, PyWavelets, matplotlib) that the loaders import.
+pyqtgraph>=0.13

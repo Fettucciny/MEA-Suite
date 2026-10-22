@@ -1,0 +1,21 @@
+name: compile-check
+
+# Cheap sanity check: every Python file in the suite byte-compiles.
+# The GUIs need the full CUDA/Qt environment from config/setup.bat, so
+# construction tests stay on the lab machines (see CLAUDE.md, "Verification ritual").
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  py-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Byte-compile every tracked .py
+        run: |
+          git ls-files '*.py' | xargs -d '\n' python -m py_compile

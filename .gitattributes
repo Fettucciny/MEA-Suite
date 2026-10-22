@@ -1,0 +1,17 @@
+# Normalise text to LF in the repo AND in the working copy (Python, JSON and
+# Markdown are LF already; this stops git rewriting them on checkout).
+*            text=auto eol=lf
+# Batch / PowerShell scripts MUST keep CRLF (LF breaks `goto` in cmd.exe).
+*.bat        text eol=crlf
+*.cmd        text eol=crlf
+*.ps1        text eol=crlf
+# Binaries
+*.ico        binary
+*.png        binary
+*.cur        binary
+*.seq        binary
+*.h5         binary
+*.npz        binary
+*.map        binary
+*.exe        binary
+*.dll        binary

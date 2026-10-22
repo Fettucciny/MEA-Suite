@@ -1,0 +1,14 @@
+# Copy this file to the suite root as .gitignore before `git init`.
+__pycache__/
+*.pyc
+*.exe
+*.seq
+*.h5
+*.pkl
+.venv/
+Output/
+_phaselock_selftest/
+_*_out/
+*.tmp
+*.bak
+mea_nap_gui_settings.json

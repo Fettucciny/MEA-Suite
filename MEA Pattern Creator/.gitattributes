@@ -1,0 +1,8 @@
+# Batch files MUST keep CRLF line endings (LF breaks `goto`).
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+# Everything else: normalise text, keep binaries untouched.
+*       text=auto
+*.ico   binary
+*.png   binary
+*.seq   binary

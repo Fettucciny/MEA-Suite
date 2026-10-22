@@ -1,0 +1,12 @@
+# Full dependency set, only for building a brand-new venv from scratch (NOT the
+# normal case — you already share the MEA .venv, which has all of this except
+# pyqtgraph). PyQt5 is the Qt binding here because PySide6 has no Python 3.14
+# wheels; on a fresh 3.14 venv even PyQt5 may need a matching wheel.
+numpy
+scipy
+h5py
+PyWavelets
+matplotlib
+tqdm
+PyQt5
+pyqtgraph>=0.13

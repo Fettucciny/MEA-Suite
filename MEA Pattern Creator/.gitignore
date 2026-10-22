@@ -1,0 +1,27 @@
+# --- Python caches ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# --- Vendor camera SDK (~300 MB of binaries; keep it on disk, out of git) ---
+amcamsdk*/
+
+# --- Per-machine / runtime state (differs between Fett and FettLaptop) ---
+camera_settings.json
+camera_calibration.json
+camera_connect.log
+error.log
+_reload_recovery.*
+sync_probe.txt
+
+# --- Large generated data: regenerate with tools/ instead ---
+*.seq
+*.zip
+*.timing.json
+*.align.json
+
+# --- Built launcher binary (rebuilt from C source; see LAUNCHER_AND_PACKAGING.md) ---
+*.exe
+
+# --- Personal Claude Code notes ---
+CLAUDE.local.md

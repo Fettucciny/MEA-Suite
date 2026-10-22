@@ -1,0 +1,48 @@
+# =====================================================================
+#  MEA Analyzer  --  Python 3.14 dependency lock  (installed by setup.bat)
+# ---------------------------------------------------------------------
+#  Covers every tool that shares the .venv: MEA Analyzer (MEA-NAP),
+#  MEA Explorer / raster viewer, MEA Pattern Creator, MEA Solar Cell.
+#  Versions are pinned to what the working environment on 'fett' uses.
+#
+#  PyTorch is installed SEPARATELY by setup.bat, because the CUDA build
+#  (torch==2.11.0+cu128) comes from the PyTorch wheel index, not PyPI.
+# =====================================================================
+
+# --- numerics / IO ---
+numpy==2.4.6
+scipy==1.18.0
+pandas==3.0.3
+h5py==3.16.0
+PyWavelets==1.9.0
+numba==0.66.0
+scikit-learn==1.9.0
+
+# --- plotting ---
+matplotlib==3.11.0
+seaborn==0.13.2
+pillow==12.2.0
+
+# --- MEA / signal-processing domain ---
+spkit==0.0.9.7
+mcspy==1.3.1
+mcspydatatools==0.4.3
+python-picard==0.8.2
+
+# --- GUI (raster viewer / explorer) ---
+pyqtgraph==0.14.0
+PyQt5==5.15.11
+# PyQt6 powers the MEA Analyzer (MEA-NAP) GUI, ported from Tkinter for a
+# smooth, GPU-accelerated window. Installs alongside PyQt5 (different
+# import name) so the PyQt5 programs are unaffected. Unpinned so pip
+# resolves the right wheel for the installed Python (3.14).
+PyQt6
+
+# --- misc / utilities ---
+tqdm==4.68.3
+tabulate==0.10.0
+pint==0.25.3
+
+# --- optional GPU array library (CUDA 12.x). Remove if the target
+#     machine has no NVIDIA GPU and you don't need cupy. ---
+cupy-cuda12x==14.1.1

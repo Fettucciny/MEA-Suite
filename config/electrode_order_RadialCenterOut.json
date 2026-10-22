@@ -1,0 +1,185 @@
+{
+  "format": "mea-explorer-electrode-order",
+  "version": 1,
+  "description": "Radial centre-out order for config/Oct2026_RadialCenterOut.seq: electrodes sorted by distance from the array centre (between 44/45/54/55), ties broken clockwise from 12 o'clock, so the y axis spirals outward. First entry = top row of the raster.",
+  "order": [
+    "54",
+    "55",
+    "45",
+    "44",
+    "53",
+    "64",
+    "65",
+    "56",
+    "46",
+    "35",
+    "34",
+    "43",
+    "63",
+    "66",
+    "36",
+    "33",
+    "52",
+    "74",
+    "75",
+    "57",
+    "47",
+    "25",
+    "24",
+    "42",
+    "62",
+    "73",
+    "76",
+    "67",
+    "37",
+    "26",
+    "23",
+    "32",
+    "51",
+    "72",
+    "84",
+    "85",
+    "77",
+    "58",
+    "48",
+    "27",
+    "15",
+    "14",
+    "22",
+    "41",
+    "61",
+    "83",
+    "86",
+    "68",
+    "38",
+    "16",
+    "13",
+    "31",
+    "71",
+    "82",
+    "87",
+    "78",
+    "28",
+    "17",
+    "12",
+    "21"
+  ],
+  "rings": [
+    {
+      "d2": 0.5,
+      "distance_pitch": 0.707,
+      "approx_frame": 2.9,
+      "electrodes": [
+        "54",
+        "55",
+        "45",
+        "44"
+      ]
+    },
+    {
+      "d2": 2.5,
+      "distance_pitch": 1.581,
+      "approx_frame": 6.5,
+      "electrodes": [
+        "53",
+        "64",
+        "65",
+        "56",
+        "46",
+        "35",
+        "34",
+        "43"
+      ]
+    },
+    {
+      "d2": 4.5,
+      "distance_pitch": 2.121,
+      "approx_frame": 8.7,
+      "electrodes": [
+        "63",
+        "66",
+        "36",
+        "33"
+      ]
+    },
+    {
+      "d2": 6.5,
+      "distance_pitch": 2.55,
+      "approx_frame": 10.4,
+      "electrodes": [
+        "52",
+        "74",
+        "75",
+        "57",
+        "47",
+        "25",
+        "24",
+        "42"
+      ]
+    },
+    {
+      "d2": 8.5,
+      "distance_pitch": 2.915,
+      "approx_frame": 11.9,
+      "electrodes": [
+        "62",
+        "73",
+        "76",
+        "67",
+        "37",
+        "26",
+        "23",
+        "32"
+      ]
+    },
+    {
+      "d2": 12.5,
+      "distance_pitch": 3.536,
+      "approx_frame": 14.5,
+      "electrodes": [
+        "51",
+        "72",
+        "84",
+        "85",
+        "77",
+        "58",
+        "48",
+        "27",
+        "15",
+        "14",
+        "22",
+        "41"
+      ]
+    },
+    {
+      "d2": 14.5,
+      "distance_pitch": 3.808,
+      "approx_frame": 15.6,
+      "electrodes": [
+        "61",
+        "83",
+        "86",
+        "68",
+        "38",
+        "16",
+        "13",
+        "31"
+      ]
+    },
+    {
+      "d2": 18.5,
+      "distance_pitch": 4.301,
+      "approx_frame": 17.6,
+      "electrodes": [
+        "71",
+        "82",
+        "87",
+        "78",
+        "28",
+        "17",
+        "12",
+        "21"
+      ]
+    }
+  ]
+}

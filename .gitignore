@@ -1,0 +1,73 @@
+# MEA Suite — suite-root .gitignore
+# Per-program .gitignore files (Pattern Creator, Solar Cell Analyzer) add their own
+# rules on top of these.
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# --- Built launchers: rebuilt from launcher.c (see */LAUNCHER_AND_PACKAGING.md).
+#     Ship them as GitHub Release assets, not in history. ---
+*.exe
+*.o
+*.obj
+*.res
+
+# --- Vendor camera SDK (~300 MB, AmScope/ToupTek licence) ---
+MEA Pattern Creator/amcamsdk*/
+
+# --- Polygon sequences (36–44 MB each) and the 18 MB 4X reference photo.
+#     Regenerate with "MEA Pattern Creator/tools/" or fetch from the shared drive. ---
+*.seq
+config/1 Solar Cell.png
+
+# --- Diagnostic dumps and stale archives ---
+*.npz
+*.zip
+*.tmp
+*.bak
+
+# --- Raw recordings and analysis outputs never live in the code tree ---
+*.h5
+*.hdf5
+*.mat
+*.pkl
+Output/
+_phaselock_selftest/
+_*_out/
+**/tests/out/
+# keep the tiny synthetic test fixtures
+!**/tests/fixtures/**/Output/
+!**/tests/fixtures/**/*.h5
+!**/tests/fixtures/**/*.npz
+
+# --- Per-machine state (synced by Nextcloud, meaningless in git) ---
+MEA Analyzer/MEA-NAP/mea_nap_gui_settings.json
+MEA Explorer/mea_explorer_settings.json
+MEA Solar Cell Analyzer/settings.json
+MEA Pattern Creator/camera_settings.json
+MEA Pattern Creator/camera_calibration.json
+MEA Pattern Creator/sync_probe.txt
+mea_*_settings.json
+*.log
+_reload_recovery.*
+
+# --- Frozen Tk copy; the Qt6 Analyzer supersedes it ---
+MEA Analyzer (Legacy)/
+
+# --- Personal notes / local tool config ---
+CLAUDE.local.md
+.claude/settings.local.json
+
+# --- OS / editor cruft ---
+desktop.ini
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/

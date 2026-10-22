@@ -1,0 +1,18 @@
+# MEA Solar Cell Analyzer — runtime dependencies.
+#
+# You do NOT install these directly. The shared environment for all four MEA
+# programs is built once per machine by `setup.bat` in the MEA Analyzer root
+# folder (it installs PyTorch + the root requirements.txt into
+# %USERPROFILE%\Documents\MEA Analyzer\.venv). Nothing auto-installs at launch —
+# if imports fail, run setup.bat. See LAUNCHER_AND_PACKAGING.md.
+#
+# This app imports, specifically:
+numpy
+scipy
+h5py
+PyWavelets        # reused MEA-NAP bior1.5 detector
+pyqtgraph>=0.13   # GUI
+PyQt6             # Qt binding (PyQt5 still works — the GUI is binding-agnostic)
+matplotlib        # calibration-report plots
+pillow            # microscope-image overlay + µm/px metadata
+# via the reused MEA-NAP loaders: torch (spike detection), tqdm
