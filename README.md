@@ -90,6 +90,5 @@ GUIs need the full CUDA/Qt environment and are verified on the lab machines.
 
 The analysis pipeline in `MEA Analyzer\MEA-NAP\` is a Python port of
 [MEA-NAP](https://github.com/SAND-Lab/MEA-NAP) by the SAND Lab (University of
-Cambridge), which is released under the GNU GPL-3.0. A licence for this
-repository has not been chosen yet; because of the MEA-NAP derivation it should
-be GPL-3.0-compatible.
+Cambridge), which is released under the GNU GPL-3.0. This repository is
+licensed under the GNU General Public License v3.0; see `LICENSE`.
