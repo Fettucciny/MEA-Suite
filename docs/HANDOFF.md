@@ -113,9 +113,9 @@ items were recorded here.
 3. ISI_N histogram diagnostic panel in the electrode explorer (offered, not requested).
 4. Reconcile the 2.575 vs 2.70004 µm/px calibration discrepancy.
 5. The MEA Analyzer "0% starting…" report with SpKit EGM + Phase Lock-In.
-6. Consider `git init` here with the provided `.gitignore` (Nextcloud + git can
-   conflict on `.git\` internals; a bare repo outside the synced folder, or syncing
-   only the working tree, is safer).
+6. ~~`git init`~~ Done 2026-10-22 (suite-root repo, see root `README.md`). Still
+   to do: add `.git` to the Nextcloud client's ignore list, choose a licence
+   (GPL-3.0-compatible because of the MEA-NAP derivation), create the GitHub remote.
 
 ## Recent change log
 - 2026-10-19 `config\electrode_order_RadialCenterOut.json` + preview.

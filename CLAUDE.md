@@ -71,12 +71,15 @@ sync client holds file handles, so any atomic `os.replace` must tolerate
 
 ## Git
 
-This tree is not yet a git repository. Initialise one at the suite root on the
-first Claude Code session (`git init`), using the `.gitignore` in
-`MEA Analyzer\MEA-NAP\dev\gitignore.txt` (exclude `__pycache__`, `*.exe`,
-`*.seq`, `*.h5`, `Output\`, `.venv`). Until then, the only rollback is the
-dated legacy copies (e.g. `mea_nap_phase_lockin_legacy_10_19_26.py` + its
-`Rollback ... .bat`). Commit after every verified change.
+The suite root is a git repository (initialised 2026-10-22, branch `main`).
+`.gitignore` excludes `__pycache__`, `*.exe`, `*.seq`, `*.h5`, `*.npz`, `Output\`,
+`.venv`, the camera SDK, per-machine settings and `MEA Analyzer (Legacy)\`;
+`.gitattributes` pins LF for text and CRLF for `.bat`/`.ps1`. Commit after every
+verified change. The dated legacy copies (e.g.
+`mea_nap_phase_lockin_legacy_10_19_26.py` + its `Rollback ... .bat`) remain as a
+belt-and-braces rollback for the phase lock-in. The tree is Nextcloud-synced:
+add `.git` to the Nextcloud client's ignored-files list so the two do not fight
+over repository internals.
 
 ## Where the history is
 
