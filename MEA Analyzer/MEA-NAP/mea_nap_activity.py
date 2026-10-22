@@ -167,6 +167,17 @@ def _bursts_maxinterval(s, bp):
     return bursts
 
 
+def _runs_of_true(mask):
+    """Half-open [i, j) runs of True in a 1-D bool array, as an (n_runs, 2)
+    int array. Vectorised replacement for the per-element while-loops below;
+    the runs it returns are exactly the (i, j) pairs those loops visited."""
+    if mask.size == 0:
+        return np.empty((0, 2), dtype=np.int64)
+    m = np.concatenate(([False], mask, [False]))
+    d = np.diff(m.astype(np.int8))
+    return np.column_stack([np.where(d == 1)[0], np.where(d == -1)[0]])
+
+
 def _bursts_isi_n(s, bp):
     """Bakkum ISI_N: burst = run of spikes whose N-spike span stays <= threshold."""
     n = s.size
@@ -175,18 +186,11 @@ def _bursts_isi_n(s, bp):
         return []
     isi_n = s[N - 1:] - s[:n - N + 1]              # ISI_N[i] spans s[i .. i+N-1]
     in_b = isi_n <= bp["isi_n_thr_s"]
-    bursts, i, m = [], 0, in_b.size
-    while i < m:
-        if in_b[i]:
-            j = i
-            while j < m and in_b[j]:
-                j += 1
-            a = i
-            b = min(j - 1 + N - 1, n - 1)
-            bursts.append([s[a], s[b], a, b + 1])
-            i = j
-        else:
-            i += 1
+    bursts = []
+    for i, j in _runs_of_true(in_b):               # same runs the old loop found
+        a = int(i)
+        b = int(min(j - 1 + N - 1, n - 1))
+        bursts.append([s[a], s[b], a, b + 1])
     return bursts
 
 
@@ -255,20 +259,13 @@ def detect_network_bursts(spikes_by_ch, np_=NETBURST_PARAMS):
         return []
     isi_n = t[N - 1:] - t[:n - N + 1]
     in_b = isi_n <= np_["net_isi_thr_s"]
-    out, i, m = [], 0, in_b.size
-    while i < m:
-        if in_b[i]:
-            j = i
-            while j < m and in_b[j]:
-                j += 1
-            a, b = i, min(j - 1 + N - 1, n - 1)
-            uniq = np.unique(c[a:b + 1])
-            if uniq.size >= np_["net_min_chan"]:
-                out.append({"start": float(t[a]), "end": float(t[b]),
-                            "duration": float(t[b] - t[a]), "n_channels": int(uniq.size)})
-            i = j
-        else:
-            i += 1
+    out = []
+    for i, j in _runs_of_true(in_b):               # same runs the old loop found
+        a, b = int(i), int(min(j - 1 + N - 1, n - 1))
+        uniq = np.unique(c[a:b + 1])
+        if uniq.size >= np_["net_min_chan"]:
+            out.append({"start": float(t[a]), "end": float(t[b]),
+                        "duration": float(t[b] - t[a]), "n_channels": int(uniq.size)})
     return out
 
 
@@ -300,8 +297,17 @@ def analyze_activity(unit):
     nb_len = [b["end"] - b["start"] for b in net_bursts]
     nb_nch = [b["n_channels"] for b in net_bursts]
     in_nb = np.zeros(all_sp.size, bool)
+    # all_sp is sorted, so each burst is one contiguous slice: searchsorted gives
+    # the identical mask to `(all_sp >= start) & (all_sp <= end)` without a pass
+    # over every spike per burst. Searched as float64 ONCE: the spike arrays are
+    # float32 and searchsorted with a Python float would otherwise upcast the
+    # whole array on every call (4.5 ms x thousands of bursts); burst bounds are
+    # float32 values widened to float64, so the comparison is exact either way.
+    all64 = np.asarray(all_sp, dtype=np.float64)
     for b in net_bursts:
-        in_nb |= (all_sp >= b["start"]) & (all_sp <= b["end"])
+        lo = np.searchsorted(all64, float(b["start"]), side="left")
+        hi = np.searchsorted(all64, float(b["end"]), side="right")
+        in_nb[lo:hi] = True
     isi_all = np.diff(all_sp) if all_sp.size > 1 else np.array([])
     isi_in = isi_all[in_nb[:-1] & in_nb[1:]] if isi_all.size else isi_all
     isi_out = isi_all[~(in_nb[:-1] & in_nb[1:])] if isi_all.size else isi_all

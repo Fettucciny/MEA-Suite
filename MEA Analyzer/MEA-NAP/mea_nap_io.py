@@ -171,8 +171,55 @@ def get_device():
 # Voltage[uV] = (raw - ADZero) * ConversionFactor * 10^Exponent * 1e6
 # fs[Hz]      = 1e6 / Tick[us]
 # The whole ChannelData is read in one sequential pass (fast on a Gen5 SSD,
-# avoids per-channel chunk read-amplification) and kept in RAM.
+# avoids per-channel chunk read-amplification) and kept in RAM. MCS writes it
+# shuffle+deflate compressed in (n_channels, 4369) chunks; h5py inflates those
+# one at a time under the HDF5 global lock (~70 s for a 9 GB file), so
+# _read_channel_data pulls the raw chunks and inflates them in a thread pool
+# (zlib releases the GIL) -- byte-identical, ~5x faster. Anything that is not
+# plain shuffle/deflate with full-height chunks falls back to ds[:].
 # ==============================================================================
+_READ_THREADS = 12
+
+
+def _read_channel_data(ds):
+    """ds[:] for a 2-D HDF5 dataset, inflating chunks in parallel when the
+    layout allows it. Returns a numpy array identical to ds[:]."""
+    try:
+        import zlib
+        from concurrent.futures import ThreadPoolExecutor
+        n_ch, N = ds.shape
+        chunks = ds.chunks
+        pl = ds.id.get_create_plist()
+        filters = [pl.get_filter(i)[0] for i in range(pl.get_nfilters())]
+        # H5Z_FILTER_SHUFFLE = 2, H5Z_FILTER_DEFLATE = 1; nothing else handled
+        if (not chunks or chunks[0] != n_ch or ds.ndim != 2
+                or filters not in ([2, 1], [1])):
+            return ds[:]
+        cc = chunks[1]
+        itemsize = ds.dtype.itemsize
+        out = np.empty((n_ch, N), dtype=ds.dtype)
+        n_chunks = (N + cc - 1) // cc
+        unshuffle = (filters == [2, 1])
+
+        def job(j):
+            _, buf = ds.id.read_direct_chunk((0, j * cc))
+            raw = zlib.decompress(buf, bufsize=n_ch * cc * itemsize)
+            a = np.frombuffer(raw, np.uint8)
+            if unshuffle:
+                a = a.reshape(itemsize, -1).T.copy()
+            a = a.view(ds.dtype).reshape(n_ch, cc)
+            c0 = j * cc
+            w = min(cc, N - c0)
+            out[:, c0:c0 + w] = a[:, :w]
+
+        with ThreadPoolExecutor(max_workers=_READ_THREADS) as ex:
+            list(ex.map(job, range(n_chunks)))
+        return out
+    except Exception as e:                       # never fail the read over this
+        _log(f"  [h5 read] parallel inflate unavailable ({e!r}); using h5py")
+        return ds[:]
+
+
 class MCSFile:
     def __init__(self, filepath, stream_index=None):
         self.filepath = filepath
@@ -189,7 +236,7 @@ class MCSFile:
             info = astream[sk]["InfoChannel"][:]
             ds = astream[sk]["ChannelData"]
             self.n_samples = int(ds.shape[1])
-            self._raw = ds[:]                                   # whole file -> RAM
+            self._raw = _read_channel_data(ds)                  # whole file -> RAM
 
         labels = [l.decode() if isinstance(l, (bytes, bytearray)) else str(l)
                   for l in info["Label"]]
@@ -221,8 +268,44 @@ class MCSFile:
         return (raw - self.adzero[:, None].astype(np.float32)) \
             * self.scale[:, None].astype(np.float32)
 
+    def matrix_view(self):
+        """Lazy, label-ordered calibrated float32 rows: an object with .shape
+        and row slicing that computes `get_matrix()[s:e]` on demand (same
+        float32 arithmetic, element for element) so the detector can stream
+        channels without a second whole-file copy in RAM."""
+        return _MCSMatrixView(self)
+
     def free(self):
         self._raw = None
+
+
+class _MCSMatrixView:
+    ndim = 2
+
+    def __init__(self, mcs):
+        self._m = mcs
+        self.shape = (mcs.n_channels, mcs.n_samples)
+        self.dtype = np.float32
+
+    def __len__(self):
+        return self.shape[0]
+
+    def __getitem__(self, key):
+        m = self._m
+        if isinstance(key, tuple):
+            key, rest = key[0], key[1:]
+        else:
+            rest = ()
+        if isinstance(key, slice):
+            idx = np.arange(m.n_channels)[key]
+            raw = m._raw[m.rows[idx]].astype(np.float32)
+            a = (raw - m.adzero[idx, None].astype(np.float32)) \
+                * m.scale[idx, None].astype(np.float32)
+        else:
+            i = int(key)
+            raw = m._raw[int(m.rows[i])].astype(np.float32)
+            a = (raw - np.float32(m.adzero[i])) * np.float32(m.scale[i])
+        return a[rest] if rest else a
 
 
 # ==============================================================================
@@ -750,7 +833,7 @@ def detect_file(stem, prog, phash, device, gui=None):
                         note=f"detecting: channel {done}/{nch}")
 
         spikes = det.detect_spikes_matrix(
-            mcs.get_matrix(), mcs.fs, device=device, progress=_prog)
+            mcs.matrix_view(), mcs.fs, device=device, progress=_prog)
         bar.close()
         params = dict(det.DETECT_PARAMS); params["fs"] = mcs.fs
         auto_ground, reasons, noise = [], {}, None

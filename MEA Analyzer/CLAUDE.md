@@ -50,6 +50,10 @@ the phase lock-in figures from the results cache without computing.
   Changing it needs a run; plot-only keys (`_PLOT_ONLY_KEYS`) only need Replot.
 - Rollback: `Rollback Phase Lock-In to 10_19_26.bat` swaps in the pre-
   vectorisation legacy build; run it again to swap back.
+- `null_model` ("rotation" default | "position"): the rotation null is driven
+  to the p floor by synchrony alone (every pre/post/control window on the Oct
+  2026 batch); "position" shuffles electrode positions and is the propagation
+  test. See HANDOFF section 8.2 before interpreting `p_value`.
 
 ## Things not to do
 

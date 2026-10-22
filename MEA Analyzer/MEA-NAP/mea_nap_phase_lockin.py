@@ -186,6 +186,22 @@ PHASE_LOCKIN = {
     "do_pvalue":            True,
     # n_perm : permutations for the p-value null. Range 100 - 1000.
     "n_perm":               200,
+    # null_model : what the permutation p-value tests.
+    #   "rotation" (the original): each electrode's preferred phase is replaced
+    #     by a random one, keeping its lock strength. This rejects whenever the
+    #     phases are NOT independent across electrodes -- which synchronous
+    #     network bursting alone guarantees (a flat, k~0 phase map). On the
+    #     2026-10 batch it put every pre / post / no-stimulus control window at
+    #     the p floor, so it does not distinguish a travelling wave from
+    #     synchrony.
+    #   "position": electrode POSITIONS are shuffled while every electrode keeps
+    #     its own resultant. The common-phase (k=0) component is invariant, so
+    #     the test asks whether the SPATIAL arrangement of the phases beats a
+    #     random arrangement -- the standard travelling-wave null. Same batch:
+    #     15/15 stim windows p<0.05, 1/15 pre, 2/15 post, 0/10 controls.
+    #   Options: "rotation" | "position". Default kept at "rotation" so existing
+    #   CSVs stay comparable; switch to "position" for a propagation test.
+    "null_model":           "rotation",
     # pitch_um : inter-electrode spacing (um); sets the spatial Nyquist and the
     #   speed scale (MCS 60-MEA = 200). Range 100 - 700.
     "pitch_um":             200.0,
@@ -439,9 +455,16 @@ def refine_period(spike_s, t0_s, t1_s, label_xy, seed_period, pitch_um,
 # ==============================================================================
 # permutation null
 # ==============================================================================
-def permutation_pvalue(locks, pitch_um, fit, n_perm=200, seed=0):
-    """Null: independently rotate each electrode's preferred phase, recompute peak
-    plane-wave coherence. p = fraction of nulls whose best coherence >= observed.
+def permutation_pvalue(locks, pitch_um, fit, n_perm=200, seed=0, null="rotation"):
+    """Permutation p-value of the peak plane-wave coherence.
+
+    null="rotation": independently rotate each electrode's preferred phase
+    (keeping its lock strength) and recompute the peak coherence. Rejects when
+    phases are not independent across electrodes -- synchrony alone does that.
+    null="position": shuffle the electrode positions, each electrode keeping its
+    own resultant z. The k=0 (common-phase) coherence is invariant under this,
+    so only the spatial organisation of the phases is tested.
+    p = (1 + #{null >= observed}) / (n_perm + 1).
 
     IMPORTANT: the observed statistic is recomputed here on the SAME grid the null
     uses (no parabolic refinement) so observed and permuted data go through an
@@ -459,15 +482,20 @@ def permutation_pvalue(locks, pitch_um, fit, n_perm=200, seed=0):
     Ex = np.exp(-1j * np.outer(ks, xx))          # (nk, nelec)
     Ey = np.exp(-1j * np.outer(ks, yy))          # (nk, nelec)
 
-    def _best(z):
-        M = Ex @ ((w * z)[:, None] * Ey.T)       # (nk, nk): coherence at every k
+    def _best(z, Ex_=Ex, Ey_=Ey):
+        M = Ex_ @ ((w * z)[:, None] * Ey_.T)     # (nk, nk): coherence at every k
         return float(np.abs(M).max()) / ws
 
     obs = _best(z_obs)                           # same statistic as the null
     ge = 0
-    for _ in range(n_perm):
-        zz = amp * np.exp(1j * rng.uniform(0, 2 * np.pi, len(locks)))
-        ge += (_best(zz) >= obs)
+    if str(null).lower() == "position":
+        for _ in range(n_perm):
+            perm = rng.permutation(len(locks))
+            ge += (_best(z_obs, Ex[:, perm], Ey[:, perm]) >= obs)
+    else:
+        for _ in range(n_perm):
+            zz = amp * np.exp(1j * rng.uniform(0, 2 * np.pi, len(locks)))
+            ge += (_best(zz) >= obs)
     return (ge + 1) / (n_perm + 1)
 
 
@@ -536,7 +564,8 @@ def lockin_window(spike_s, dur_s, label_xy, p, seed_period=None):
         fit["note"] = "; ".join(low)
     if p.get("do_pvalue"):
         fit["p_value"] = permutation_pvalue(locks, pitch, fit,
-                                            n_perm=int(p.get("n_perm", 200)))
+                                            n_perm=int(p.get("n_perm", 200)),
+                                            null=p.get("null_model", "rotation"))
     return fit
 
 

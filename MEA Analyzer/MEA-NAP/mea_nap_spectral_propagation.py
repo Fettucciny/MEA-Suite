@@ -244,15 +244,31 @@ def _electrode_pos(labels):
     return keep, np.array(pos, float)
 
 
-def _lat_in_window(unit, t0, t1):
-    """First-spike LAT (ms since t0) per electrode with a spike in [t0, t1).
-    Uses searchsorted (spike trains are sorted by io.window_unit) so cost per
-    window is O(log n) not O(n) — important on long, high-firing recordings."""
-    lat = {}
+def _spikes64(unit):
+    """[(label, float64 sorted spike array), ...] for one unit, converted ONCE.
+    _lat_in_window used to call np.asarray(s, float) on every electrode for
+    every event: on a 60-min day-5 recording that is ~700k conversions of
+    float32 trains per figure (~940 s per file). The float64 values are the
+    same ones the old per-call conversion produced, so every latency is
+    identical."""
+    out = []
     for l, s in zip(unit["labels"], unit["spikes"]):
         s = np.asarray(s, float)
-        if s.size == 0:
-            continue
+        if s.size:
+            out.append((l, s))
+    return out
+
+
+def _lat_in_window(unit, t0, t1, spikes64=None):
+    """First-spike LAT (ms since t0) per electrode with a spike in [t0, t1).
+    Uses searchsorted (spike trains are sorted by io.window_unit) so cost per
+    window is O(log n) not O(n) — important on long, high-firing recordings.
+    `spikes64` is the _spikes64(unit) list; callers that loop over many events
+    pass it so the trains are converted once instead of per call."""
+    if spikes64 is None:
+        spikes64 = _spikes64(unit)
+    lat = {}
+    for l, s in spikes64:
         i = int(np.searchsorted(s, t0, side="left"))
         if i < s.size and s[i] < t1:
             lat[l] = (s[i] - t0) * 1000.0
@@ -346,8 +362,9 @@ def _events_for_region(unit, res, mode, laser_rel=None):
     min_active = (PROP_PARAMS["window_min_active_frac"] * n_elec
                   if mode == "windows" else PROP_PARAMS["min_electrodes"])
     fits = []
+    sp64 = _spikes64(unit)
     for (t0, t1) in events:
-        lat = _lat_in_window(unit, t0, t1)
+        lat = _lat_in_window(unit, t0, t1, sp64)
         if len(lat) < min_active:
             continue
         fit = _fit_wave(lat)
@@ -478,8 +495,9 @@ def _region_activation_map(unit, res, mode, laser_rel=None):
     min_active = (PROP_PARAMS["window_min_active_frac"] * n_elec
                   if mode == "windows" else PROP_PARAMS["min_electrodes"])
     acc, cnt = {}, {}
+    sp64 = _spikes64(unit)
     for (t0, t1) in events:
-        lat = _lat_in_window(unit, t0, t1)
+        lat = _lat_in_window(unit, t0, t1, sp64)
         if len(lat) < min_active:
             continue
         m = min(lat.values())                    # align each event to its first spike

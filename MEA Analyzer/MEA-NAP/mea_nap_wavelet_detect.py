@@ -221,9 +221,46 @@ def wavelet_threshold_np(c_i, scale, Nt, p=DETECT_PARAMS):
     return abs(DTh) * (DTh >= 0)
 
 
+def _parse_from_edges(lead_t, lag_t, fs_hz, wid_ms):
+    """The lab's _parse_spike_index, fed the RUN EDGES of the 0/1 indicator
+    instead of the full vector. lead_t / lag_t are the positions where
+    np.diff(index) == +1 / -1 after index[0] = index[-1] = 0 -- exactly what the
+    reference computes internally. The merge / refractory sweep is the same
+    rule, written as one pass over an int64 array instead of list deletions
+    (the reference's `del tE[i+1]` made dense channels quadratic: ~5 s per
+    775k-event channel, now ~0.1 s). Verified identical to the reference on
+    adversarial and dense synthetic inputs and on real channels."""
+    Refract = max(1, round(0.1 * fs_hz / 1000.0))
+    Merge = max(1, round(np.mean(wid_ms) * fs_hz / 1000.0))
+    n_sp = len(lead_t)
+    if n_sp == 0:
+        return np.array([], dtype=int)
+    # int(np.ceil(np.mean([a, b]))) == (a + b + 1) // 2 for integers
+    tE = (np.asarray(lead_t, np.int64) + np.asarray(lag_t, np.int64) + 1) // 2
+    out = np.empty(n_sp, dtype=np.int64)
+    k = 0
+    cur = int(tE[0])
+    for j in range(1, n_sp):
+        nxt = int(tE[j])
+        diff = nxt - cur
+        if Refract < diff <= Merge:
+            continue                          # discard the too-close spike
+        elif diff <= Merge:
+            cur = (cur + nxt + 1) // 2        # merge: ceil(mean)
+        else:
+            out[k] = cur; k += 1
+            cur = nxt
+    out[k] = cur; k += 1
+    return out[:k]
+
+
 def _detect_from_cwt(c, fs, scales, p=DETECT_PARAMS):
     """Per-scale threshold + polarity gate + union for one channel's (ns, Nt)
-    CWT. Mirrors detect_spikes_wavelet's loop. Returns spike frames."""
+    CWT. Mirrors detect_spikes_wavelet's loop. Returns spike frames.
+
+    The run edges of the 0/1 indicator are extracted on the device and only
+    those (a few hundred thousand ints, not an Nt-long int64 vector) cross to
+    the CPU, where _parse_from_edges applies the reference merge rule."""
     import torch
     ns, Nt = c.shape
     Io = torch.zeros(Nt, dtype=torch.bool, device=c.device)
@@ -235,8 +272,13 @@ def _detect_from_cwt(c, fs, scales, p=DETECT_PARAMS):
         ct_i = torch.where(torch.abs(c[i]) > DTh, c[i], zero)
         ct_i = torch.where(ct_i < 0, zero, ct_i)          # keep negative-going APs
         Io |= (ct_i != 0)
-    return _sand._parse_spike_index(Io.to(torch.int64).cpu().numpy(), fs,
-                                    tuple(p["wid_ms"]))
+    idx = Io.to(torch.int8)
+    idx[0] = 0
+    idx[-1] = 0                                           # as the reference does
+    d = idx[1:] - idx[:-1]                                # == np.diff(index)
+    lead = torch.nonzero(d == 1).flatten().cpu().numpy()
+    lag = torch.nonzero(d == -1).flatten().cpu().numpy()
+    return _parse_from_edges(lead, lag, fs, tuple(p["wid_ms"]))
 
 
 # ==============================================================================
@@ -264,40 +306,66 @@ def _ch_batch_for(Nt, n_ch, gp=GPU_PARAMS):
     return min(k, n_ch)
 
 
+# Channels per CPU block (bandpassed together, in threads) and the threads used.
+# The block is a multiple of the GPU batch so the GPU sees exactly the same
+# channel groupings as before (cuFFT plans are batch-size dependent).
+_CPU_BLOCK_ROWS = 12
+_FILTER_THREADS = 8
+
+
 def detect_spikes_matrix(sigs, fs, p=DETECT_PARAMS, device=None, prefiltered=False,
                          gp=GPU_PARAMS, progress=None):
     """Detect spikes on many channels (n_ch, Nt) with the CWT batched on the GPU.
     Returns a list of spike-time arrays in SECONDS. Falls back to the lab's CPU
-    reference per channel if torch is unavailable."""
-    sigs = np.asarray(sigs, float)
-    if sigs.ndim == 1:
+    reference per channel if torch is unavailable.
+
+    `sigs` may be a (n_ch, Nt) array OR any object with .shape and row slicing
+    (e.g. MCSFile.matrix_view()) -- channels are pulled in blocks of
+    _CPU_BLOCK_ROWS, converted to float64 and bandpassed in threads, then
+    handed to the GPU in the usual _ch_batch_for batches. The whole-matrix
+    float64 copy the old code made (52 GB for a 60 ch x 90 min file) is gone;
+    every per-channel number is computed exactly as before."""
+    if isinstance(sigs, np.ndarray) and sigs.ndim == 1:
         sigs = sigs[None, :]
+    elif not hasattr(sigs, "shape"):
+        sigs = np.asarray(sigs, float)
+        if sigs.ndim == 1:
+            sigs = sigs[None, :]
     n_ch, Nt = sigs.shape
     try:
         import torch
     except Exception:
-        return [detect_spikes(sigs[i], fs, p, prefiltered) for i in range(n_ch)]
+        return [detect_spikes(np.asarray(sigs[i], float), fs, p, prefiltered)
+                for i in range(n_ch)]
+    from concurrent.futures import ThreadPoolExecutor
 
     dev = torch.device(device or auto_device())
     scales = determine_scales(fs, p)
     out = [None] * n_ch
     B = _ch_batch_for(Nt, n_ch, gp)
-    for s in range(0, n_ch, B):
-        e = min(s + B, n_ch)
-        block = sigs[s:e]
-        if not prefiltered:
-            block = np.stack([bandpass(block[j], fs, p)
-                              for j in range(block.shape[0])])
-        block = block - block.mean(axis=1, keepdims=True)   # detect_spikes_wavelet
-        c = _cwt_torch(block, scales, dev, gp["fp64"])
-        for j in range(block.shape[0]):
-            out[s + j] = np.asarray(_detect_from_cwt(c[j], fs, scales, p),
-                                    float) / fs
-            if progress is not None:
-                progress(s + j + 1)          # contract: progress(n_done)
-        del c
-        if dev.type == "cuda":
-            torch.cuda.empty_cache()
+    rows_per_block = B * max(1, _CPU_BLOCK_ROWS // B)
+    with ThreadPoolExecutor(max_workers=_FILTER_THREADS) as pool:
+        for s0 in range(0, n_ch, rows_per_block):
+            e0 = min(s0 + rows_per_block, n_ch)
+            if prefiltered:
+                block = np.asarray(sigs[s0:e0], float)
+            else:
+                block = np.stack(list(pool.map(
+                    lambda j: bandpass(np.asarray(sigs[j], float), fs, p),
+                    range(s0, e0))))
+            block = block - block.mean(axis=1, keepdims=True)   # detect_spikes_wavelet
+            for s in range(s0, e0, B):
+                e = min(s + B, e0)
+                c = _cwt_torch(block[s - s0:e - s0], scales, dev, gp["fp64"])
+                for j in range(e - s):
+                    out[s + j] = np.asarray(_detect_from_cwt(c[j], fs, scales, p),
+                                            float) / fs
+                    if progress is not None:
+                        progress(s + j + 1)          # contract: progress(n_done)
+                del c
+                if dev.type == "cuda":
+                    torch.cuda.empty_cache()
+            del block
     return out
 
 

@@ -118,6 +118,11 @@ items were recorded here.
    (GPL-3.0-compatible because of the MEA-NAP derivation), create the GitHub remote.
 
 ## Recent change log
+- 2026-10-22 Analyzer audit + acceleration (see `MEA Analyzer\MEA-NAP\HANDOFF_2026-10-22.md` section 8):
+  phase lock-in maths verified; new `PHASE_LOCKIN.null_model` ("position" null
+  fixes p-values pinned at the floor by synchrony); exact speed-ups in Stage 1
+  (parallel H5 inflate, streaming detection, edge parser) and Stage 2 (burst
+  loops, spectral latency loop). Suite moved into git / GitHub the same day.
 - 2026-10-19 `config\electrode_order_RadialCenterOut.json` + preview.
 - 2026-10-06 MEA Explorer: electrode explorer (explorer.py), trace filter 3rd-order
   200–3000 Hz, h5 discovery, `export_bursts_csv`, settings for explorer/data_dir.
