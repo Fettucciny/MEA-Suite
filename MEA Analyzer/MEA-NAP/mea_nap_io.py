@@ -63,6 +63,17 @@ CONFIG = {
     # (e.g. a 420 s "post" row on a 300 s file) and previously produced empty
     # plots, divide-by-zero activity levels, and 0-bin STTC errors.
     "MIN_WINDOW_S":        1.0,        # min usable window (s). Range 0.5 - 5.0
+    # Snap each Batch.csv window boundary to the laser-trigger block recorded in
+    # the file. The Polygon fires 50 triggers/s while sweeping and nothing during
+    # baseline, so the trigger timestamps mark the TRUE stim window; on the
+    # MEA 100926 batch the recorded block drifts up to 44 s from the nominal
+    # 300-3600 s rows (e.g. Sample_2_Training_D5 stim = 344-3644 s), which put up
+    # to 44 s of ongoing stimulation at the start of "post". A row boundary
+    # within 60 s of a block edge is moved onto it; rows in files without a
+    # block (controls) and boundaries further away are untouched. Every change
+    # is logged. Affects Stage 2, SpKit and the phase lock-in identically.
+    # Options: True | False (False = use the Batch.csv windows exactly as written).
+    "WINDOWS_FROM_TRIGGERS": True,
     # GROUP GATING (set by the GUI group panel; None = all groups, the default).
     #   GROUPS_DETECT  : iterable of group names allowed into Stage-1 spike detection.
     #   GROUPS_ANALYZE : iterable of group names allowed into Stage-2 analysis.
@@ -995,8 +1006,79 @@ def window_unit(row):
             "frames": row.get("frames")}
 
 
+# boundary snap tolerance (s): a Batch.csv edge further than this from a trigger
+# block edge is assumed intentional and left alone.
+_TRIG_SNAP_TOL_S = 60.0
+_trigger_block_cache = {}
+
+
+def _main_trigger_block(stem):
+    """(start_s, end_s) of the file's dominant trigger block, or None. Cached."""
+    if stem in _trigger_block_cache:
+        return _trigger_block_cache[stem]
+    blk = None
+    fp = os.path.join(CONFIG["DATA_DIR"], stem + ".h5")
+    if os.path.exists(fp):
+        try:
+            import mea_nap_digital_events as _de
+            blocks = _de.trigger_blocks(
+                _de.read_digital_events(fp, CONFIG.get("STREAM_INDEX")))
+            if blocks:
+                b = max(blocks, key=lambda t: t[2])
+                blk = (b[0], b[1])
+        except Exception as e:
+            _log(f"  [windows] {stem}: trigger read failed ({e!r}); "
+                 f"Batch.csv windows kept")
+    _trigger_block_cache[stem] = blk
+    return blk
+
+
+def adjust_windows_from_triggers(rows):
+    """Return copies of `rows` with window boundaries snapped to each file's
+    recorded laser-trigger block (see CONFIG["WINDOWS_FROM_TRIGGERS"]).
+
+    Rule: any window start/end within _TRIG_SNAP_TOL_S of the block's first or
+    last trigger moves onto it, so `pre` ends when stimulation really starts,
+    `stim` covers exactly the triggered span, and `post` begins when the last
+    trigger fired. Region names are not consulted -- only proximity -- so
+    custom layouts behave sensibly. Files without a block are untouched.
+    Resolution: one trigger (20 ms at 50 Hz); the final frame stays on ~one
+    inter-trigger interval past the last trigger, which is negligible."""
+    if not CONFIG.get("WINDOWS_FROM_TRIGGERS"):
+        return rows
+    out = []
+    logged = set()
+    for r in rows:
+        blk = _main_trigger_block(r["stem"])
+        if blk is None:
+            out.append(r)
+            continue
+        t0, t1 = float(r["win"][0]), float(r["win"][1])
+        n0, n1 = t0, t1
+        for edge in blk:
+            if abs(t0 - edge) <= _TRIG_SNAP_TOL_S:
+                n0 = edge
+            if abs(t1 - edge) <= _TRIG_SNAP_TOL_S:
+                n1 = edge
+        if (abs(n0 - t0) < 0.05 and abs(n1 - t1) < 0.05) or n1 <= n0:
+            out.append(r)
+            continue
+        r = dict(r)
+        r["win"] = (n0, n1)
+        out.append(r)
+        key = (r["stem"], r["region"])
+        if key not in logged:
+            logged.add(key)
+            _log(f"  [windows] {r['stem']} [{r['region']}]: {t0:.0f}-{t1:.0f}s "
+                 f"-> {n0:.2f}-{n1:.2f}s (laser triggers {blk[0]:.2f}-{blk[1]:.2f}s)")
+    return out
+
+
 def iter_batch_units(rows):
-    """Yield one windowed analysis unit per batch row (Stage 2 consumes these)."""
+    """Yield one windowed analysis unit per batch row (Stage 2 consumes these).
+    Windows are first snapped to each file's recorded laser-trigger block when
+    CONFIG["WINDOWS_FROM_TRIGGERS"] is on (see adjust_windows_from_triggers)."""
+    rows = adjust_windows_from_triggers(rows)
     for r in tqdm(rows, desc="Windowing units", unit="row"):
         u = window_unit(r)
         if u is not None:

@@ -80,6 +80,24 @@ def sweep_metrics(ev):
             "trigger_hz": (1.0 / med if med and med > 0 else float("nan"))}
 
 
+def trigger_blocks(ev, gap_s=5.0, min_triggers=500):
+    """Contiguous stimulation blocks from a read_digital_events() result.
+
+    Triggers separated by less than `gap_s` of silence belong to one block;
+    blocks with fewer than `min_triggers` events (stray edges, single glitch
+    pulses) are dropped. Returns [(start_s, end_s, n), ...] sorted by start.
+    On the MEA 100926 batch every training file yields exactly one block of
+    ~165k triggers at 50 Hz and controls yield none."""
+    on = np.sort(np.asarray(ev.get("on_s", []), float))
+    if on.size == 0:
+        return []
+    cut = np.where(np.diff(on) > float(gap_s))[0]
+    starts = np.r_[0, cut + 1]
+    ends = np.r_[cut, on.size - 1]
+    return [(float(on[a]), float(on[b]), int(b - a + 1))
+            for a, b in zip(starts, ends) if (b - a + 1) >= int(min_triggers)]
+
+
 def sweep_speed_mm_s(trigger_hz, calib=SWEEP_CALIB):
     """Absolute sweep speed (mm/s) if frames_per_crossing is calibrated, else NaN.
     speed = sample_diameter_mm * trigger_hz / frames_per_crossing."""

@@ -752,7 +752,7 @@ def run_spkit_egm():
     p = SPKIT_EGM
     data_dir = io.CONFIG["DATA_DIR"]
     csv = os.path.join(data_dir, io.CONFIG.get("BATCH_CSV_NAME", "Batch.csv"))
-    rows = io.parse_batch(csv)
+    rows = io.adjust_windows_from_triggers(io.parse_batch(csv))
     if not rows:
         io._log("[SpKit] no Batch.csv rows found; nothing to do.")
         return
