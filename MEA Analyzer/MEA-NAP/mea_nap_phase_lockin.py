@@ -231,6 +231,26 @@ PHASE_LOCKIN = {
     #   the full post window everywhere. Needs a run (not just a replot) to take
     #   effect, because it is a separate fit. Range 0 - 1800.
     "post_map_window_s":    150.0,
+    # exclude_fast_bursts : remove spontaneous network bursts before the lock-in.
+    #   A spontaneous burst packs most of the array's firing into tens of ms,
+    #   while the laser-driven wave spreads its spikes over the whole sweep
+    #   cycle, so bursts are detected as FAST excursions of the pooled firing
+    #   rate: 10 ms bins, an event starts when the rate exceeds
+    #   burst_rate_factor x median and extends until it falls back below
+    #   1.5 x median; only events shorter than burst_max_dur_s are removed
+    #   (slow laser-locked responses never qualify). Applies to the region
+    #   fits, the early-post fit and the convergence time course alike.
+    #   Measured on MEA 100926 day 5: stim coherence 0.34 -> 0.53 with the
+    #   direction unchanged (the bursts dilute, not create, the lock); pre
+    #   and post conclusions unchanged. Needs a run, not a replot.
+    #   Options: True | False.
+    "exclude_fast_bursts":  False,
+    # burst_rate_factor : pooled-rate threshold (x median of the 10 ms-binned
+    #   rate) at which a fast-burst event starts. Range 2 - 10.
+    "burst_rate_factor":    4.0,
+    # burst_max_dur_s : events LONGER than this are kept (they are too slow to
+    #   be a synchronous burst and may be stimulus-driven). Range 0.1 - 1.0.
+    "burst_max_dur_s":      0.3,
     # direction_smooth_bins : width (in bins) of the Gaussian smoother drawn
     #   through the convergence-over-time points. Plot-only: Replot reads it
     #   from the window, no run needed. Range 0.5 - 10.
@@ -1509,6 +1529,80 @@ def _fig_direction_means(dir_samples, p, out_dir):
 # ==============================================================================
 # driver  --  called by the GUI (do4) after Stage 2 / SpKit
 # ==============================================================================
+# fixed internals of the fast-burst mask (see PHASE_LOCKIN["exclude_fast_bursts"])
+_BURST_BIN_S = 0.01          # pooled-rate bin
+_BURST_EXIT_K = 1.5          # event extends until rate < this x median
+_BURST_PAD_S = 0.01          # mask padding on each side
+
+
+def fast_burst_mask(spikes_list, dur_s, enter_k=4.0, max_dur_s=0.3):
+    """Intervals of array-wide FAST synchrony (spontaneous network bursts).
+
+    Pooled 10 ms firing rate; an event begins where it exceeds enter_k x its
+    median and extends to where it falls back below _BURST_EXIT_K x median.
+    Events longer than max_dur_s are NOT returned: a laser-driven wave spreads
+    over the sweep cycle (seconds) and must never be masked. Returns a merged,
+    padded [(t0_s, t1_s), ...]."""
+    arrs = [np.asarray(s, float) for s in spikes_list if len(s)]
+    if not arrs:
+        return []
+    t = np.concatenate(arrs)
+    n = max(2, int(np.ceil(dur_s / _BURST_BIN_S)))
+    r, _ = np.histogram(t, bins=n, range=(0, n * _BURST_BIN_S))
+    med = max(float(np.median(r)), 1e-9)
+    hi = r > enter_k * med
+    lo = r > _BURST_EXIT_K * med
+    out, i = [], 0
+    while i < n:
+        if hi[i]:
+            a = i
+            while a > 0 and lo[a - 1]:
+                a -= 1
+            b = i
+            while b < n - 1 and lo[b + 1]:
+                b += 1
+            t0 = a * _BURST_BIN_S - _BURST_PAD_S
+            t1 = (b + 1) * _BURST_BIN_S + _BURST_PAD_S
+            if (t1 - t0) <= max_dur_s + 2 * _BURST_PAD_S:
+                out.append((max(0.0, t0), min(float(dur_s), t1)))
+            i = b + 1
+        else:
+            i += 1
+    merged = []
+    for a, b in out:
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(b, merged[-1][1]))
+        else:
+            merged.append((a, b))
+    return merged
+
+
+def _filter_fast_bursts(unit, p):
+    """A shallow copy of `unit` with spikes inside fast_burst_mask removed,
+    plus (n_removed, n_total, masked_time_s). The original unit is untouched."""
+    dur = float(unit.get("duration") or 0.0)
+    mask = fast_burst_mask(unit["spikes"], dur,
+                           enter_k=float(p.get("burst_rate_factor", 4.0)),
+                           max_dur_s=float(p.get("burst_max_dur_s", 0.3)))
+    tot = sum(len(s) for s in unit["spikes"])
+    if not mask:
+        return unit, 0, tot, 0.0
+    kept = []
+    removed = 0
+    for s in unit["spikes"]:
+        s = np.asarray(s, float)
+        keep = np.ones(s.size, bool)
+        for a, b in mask:
+            lo = np.searchsorted(s, a, "left")
+            hi = np.searchsorted(s, b, "right")
+            keep[lo:hi] = False
+        removed += int(s.size - keep.sum())
+        kept.append(s[keep].astype(s.dtype))
+    u2 = dict(unit)
+    u2["spikes"] = kept
+    return u2, removed, tot, float(sum(b - a for a, b in mask))
+
+
 def _period_seed_for_stem(stem, p, frames=None):
     """Sweep-period seed (s) for one recording: explicit override, else derived
     from the laser trigger rate (frames / trigger_hz); else None.
@@ -1553,6 +1647,14 @@ def _analyse_stem(stem, units, p, seed_T, progress=None):
     by_region = {}
     for u in units:                           # last window per region wins
         by_region[u["region"]] = u
+    if p.get("exclude_fast_bursts"):
+        for region, u in list(by_region.items()):
+            u2, n_rm, n_tot, t_mask = _filter_fast_bursts(u, p)
+            by_region[region] = u2            # fits, early post and the time
+            logs.append(                      # course all read by_region
+                f"  [PhaseLock] {stem} [{region}]: fast-burst filter removed "
+                f"{n_rm:,}/{n_tot:,} spikes ({100.0 * n_rm / max(n_tot, 1):.1f}%) "
+                f"in {t_mask:.1f}s of bursts")
     # stim first so its refined period seeds pre/post (carry-over prior)
     order = [r for r in ("stim",) if r in by_region]
     order += [r for r in by_region if r not in order]
