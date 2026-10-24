@@ -71,6 +71,15 @@ BURST_LATENCY = {
     #   alignment is scored against. Ranges 100 - 700 / 0 - 360.
     "pitch_um":             200.0,
     "sweep_angle_deg":      135.0,
+    # direction_window_s : bin width (s) for the burst-direction-over-time curve
+    #   (burst_direction_<group>.png, the burst analogue of the phase lock-in's
+    #   convergence plot). Each bin averages the per-burst convergences
+    #   50*(1+cos(theta_b - sweep)) of the travelling bursts inside it. Range
+    #   30 - 600.
+    "direction_window_s":   60.0,
+    # min_bursts_per_bin : fitted bursts a bin needs to be drawn (fewer = the
+    #   bin is left as a gap, like the lock-in's under-populated bins). Range 1 - 20.
+    "min_bursts_per_bin":   3,
 }
 
 DPI = 200
@@ -130,6 +139,7 @@ def _window_stats(unit, p):
                                int(p["min_lat_electrodes"]),
                                float(p["min_fit_r2"]))
         if f is not None:
+            f["t_s"] = 0.5 * (a + b)          # event midpoint, window-relative
             fits.append(f)
     st = {"n_events": len(events), "n_fits": len(fits)}
     if fits:
@@ -212,7 +222,7 @@ def _fig_group(group, samples, p, out_dir):
         pl._day_strip(fig.add_subplot(gs[i, 0]), i, nr, stem, age)
         for j, region in enumerate(regions):
             ax = fig.add_subplot(gs[i, j + 1], polar=True)
-            st, fits = d.get(region, ({}, []))
+            st, fits, _win = d.get(region, ({}, [], (0.0, 0.0)))
             try:
                 _rose_panel(ax, fits, st, p["sweep_angle_deg"], p["min_fits"])
             except Exception as e:                      # never lose the figure
@@ -228,6 +238,144 @@ def _fig_group(group, samples, p, out_dir):
         f"sweep {p['sweep_angle_deg']:.0f}°; bursts with plane "
         f"R² ≥ {p['min_fit_r2']:g})", fontsize=11)
     pl._save(fig, os.path.join(out_dir, f"burst_latency_{group}.png"))
+
+
+def _burst_timecourse(regions, p):
+    """Burst-direction convergence over the session, shaped like the phase
+    lock-in's series dicts so pl._draw_direction_axes / pl._mean_timecourse can
+    draw and average it: {"bins", "bands", "window_s", "mode": "linear"}.
+    regions : {region: (stats, fits, win)}. Each bin averages the per-burst
+    convergences 50*(1+cos(theta_b - sweep)); the SEM is across bursts and the
+    line colour carries the bin's direction consistency R."""
+    win_s = float(p.get("direction_window_s", 60.0) or 0.0)
+    if win_s <= 0:
+        return None
+    sweep = float(p["sweep_angle_deg"])
+    min_n = int(p.get("min_bursts_per_bin", 3))
+    bins, bands = [], []
+    for region, (st, fits, win) in regions.items():
+        t_off, t_end = float(win[0]), float(win[1])
+        dur = t_end - t_off
+        if dur <= 0:
+            continue
+        bands.append((t_off, t_end, region))
+        if not fits:
+            continue
+        t = np.array([f["t_s"] for f in fits])
+        th = np.array([f["theta_deg"] for f in fits])
+        conv = 50.0 * (1.0 + np.cos(np.radians(th - sweep)))
+        for b in range(int(np.floor(dur / win_s))):
+            sel = (t >= b * win_s) & (t < (b + 1) * win_s)
+            n = int(sel.sum())
+            if n < min_n:
+                continue
+            Rv = np.exp(1j * np.radians(th[sel])).mean()
+            bins.append({"t_mid_s": t_off + (b + 0.5) * win_s,
+                         "direction_deg": float(np.degrees(np.angle(Rv))),
+                         "convergence_pct": float(conv[sel].mean()),
+                         "sem": (float(conv[sel].std(ddof=1) / np.sqrt(n))
+                                 if n > 1 else None),
+                         "coherence": float(abs(Rv)),   # colour = consistency R
+                         "n_locked": n, "region": region})
+    bands.sort(key=lambda x: x[0])
+    bins.sort(key=lambda d: d["t_mid_s"])
+    return {"bins": bins, "bands": bands, "window_s": win_s, "mode": "linear"}
+
+
+def _fig_group_direction(group, samples, p, out_dir):
+    """burst_direction_<group>.png — rows = samples, pl drawing machinery.
+    samples : [(stem, series, age), ...]"""
+    samples = [t for t in samples if t[1] and t[1].get("bands")]
+    samples = sorted(samples, key=lambda t: (t[2] if t[2] is not None else 1e9,
+                                             t[0]))
+    if not samples:
+        return
+    nr = len(samples)
+    win_s = float(p.get("direction_window_s", 60.0) or 60.0)
+    fig = plt.figure(figsize=(13.0, 2.7 * nr + 0.9), constrained_layout=True)
+    gs = fig.add_gridspec(nr, 2, width_ratios=[0.18, 1])
+    for i, (stem, series, age) in enumerate(samples):
+        pl._day_strip(fig.add_subplot(gs[i, 0]), i, nr, stem, age)
+        ax = fig.add_subplot(gs[i, 1])
+        try:
+            pl._draw_direction_axes(ax, series, p, label_bands=(i == 0))
+        except Exception as e:                       # never lose the figure
+            ax.text(0.5, 0.5, f"row failed\n{e!r}"[:70], fontsize=7,
+                    ha="center", va="center", color="crimson",
+                    transform=ax.transAxes)
+        if i == nr - 1:
+            ax.set_xlabel("session time (min)", fontsize=9, color="#555")
+        sm = pl._ScalarMappable(norm=pl._NORM01, cmap=pl.PARULA)
+        sm.set_array([])
+        cb = fig.colorbar(sm, ax=[ax], location="right", fraction=0.025,
+                          pad=0.01)
+        cb.set_ticks([0.0, 0.5, 1.0])
+        cb.ax.tick_params(labelsize=6)
+        cb.set_label("burst-direction consistency R (0–1)", fontsize=7)
+    fig.suptitle(
+        f"Burst-travel convergence over time — group {group}   (rows = "
+        f"training days, youngest at top; each bin = mean convergence of the "
+        f"travelling bursts inside {win_s:g} s on sweep "
+        f"{float(p['sweep_angle_deg']):.0f}°; bars = ±1 SEM across "
+        f"bursts, colour = direction consistency R; gaps = bins with "
+        f"< {int(p.get('min_bursts_per_bin', 3))} travelling bursts)",
+        fontsize=11)
+    pl._save(fig, os.path.join(out_dir, f"burst_direction_{group}.png"))
+
+
+def _fig_direction_means(dir_samples, p, out_dir):
+    """burst_direction_mean_<condition>.png — day rows averaged across
+    replicate samples via pl._mean_timecourse."""
+    win_s = float(p.get("direction_window_s", 60.0) or 60.0)
+    by_cond = {}
+    for grp, items in dir_samples.items():
+        cond = _condition_of(grp)
+        for stem, series, age in items:
+            if not series or not series.get("bands"):
+                continue
+            day = pl._training_day(stem, age)
+            by_cond.setdefault(cond, {}).setdefault(day, []).append(
+                (series, age))
+    written = 0
+    for cond, days in by_cond.items():
+        if max(len(v) for v in days.values()) < 2:
+            continue
+        order = sorted(days, key=lambda d: (isinstance(d, float), d))
+        nr = len(order)
+        fig = plt.figure(figsize=(13.0, 2.7 * nr + 0.9),
+                         constrained_layout=True)
+        gs = fig.add_gridspec(nr, 2, width_ratios=[0.18, 1])
+        for i, day in enumerate(order):
+            members = days[day]
+            mean = pl._mean_timecourse([m[0] for m in members], win_s)
+            pl._mean_day_strip(fig.add_subplot(gs[i, 0]), i, nr, day,
+                               len(members), [m[1] for m in members])
+            ax = fig.add_subplot(gs[i, 1])
+            try:
+                pl._draw_direction_axes(ax, mean, p, label_bands=(i == 0))
+            except Exception as e:
+                ax.text(0.5, 0.5, f"row failed\n{e!r}"[:70], fontsize=7,
+                        ha="center", va="center", color="crimson",
+                        transform=ax.transAxes)
+            if i == nr - 1:
+                ax.set_xlabel("session time (min)", fontsize=9, color="#555")
+            sm = pl._ScalarMappable(norm=pl._NORM01, cmap=pl.PARULA)
+            sm.set_array([])
+            cb = fig.colorbar(sm, ax=[ax], location="right", fraction=0.025,
+                              pad=0.01)
+            cb.set_ticks([0.0, 0.5, 1.0])
+            cb.ax.tick_params(labelsize=6)
+            cb.set_label("mean consistency R (0–1)", fontsize=7)
+        fig.suptitle(
+            f"Burst-travel convergence over time — {cond}, mean of samples"
+            f"   (rows = training days; bars = ±1 SEM across samples; "
+            f"bins of {win_s:g} s, scored on sweep "
+            f"{float(p['sweep_angle_deg']):.0f}°)",
+            fontsize=11)
+        pl._save(fig, os.path.join(out_dir,
+                                   f"burst_direction_mean_{cond}.png"))
+        written += 1
+    return written
 
 
 def _condition_of(group):
@@ -324,7 +472,8 @@ def run_burst_latency():
         m = _re.search(r"_D(\d+)", u["stem"])
         day = int(m.group(1)) if m else None
         by_group.setdefault(u["group"], {}).setdefault(
-            u["stem"], ({}, u.get("age")))[0][u["region"]] = (st, fits)
+            u["stem"], ({}, u.get("age")))[0][u["region"]] = (
+                st, fits, u.get("win", (0.0, float(u["duration"]))))
         csv_rows.append({"stem": u["stem"], "region": u["region"],
                          "group": u["group"], "day": day, "age": u.get("age"),
                          **st})
@@ -333,12 +482,23 @@ def run_burst_latency():
                if st.get("R") is not None else "too few travelling bursts")
         io._log(f"  [BurstLat] {u['stem']} [{u['region']}]: "
                 f"{st['n_events']} burst(s), {st['n_fits']} fit(s)  {msg}")
+    dir_samples = {}
     for group, stems in by_group.items():
         samples = [(stem, d, age) for stem, (d, age) in stems.items()]
         _fig_group(group, samples, p, out_dir)
+        for stem, (d, age) in stems.items():
+            try:
+                series = _burst_timecourse(d, p)
+            except Exception as e:
+                series = None
+                io._log(f"  [BurstLat] {stem}: time course failed ({e!r})")
+            dir_samples.setdefault(group, []).append((stem, series, age))
+        _fig_group_direction(group, dir_samples[group], p, out_dir)
     _write_csv(csv_rows, out_dir)
     _fig_summary(csv_rows, p, out_dir)
-    io._log(f"[BurstLat] done - {len(by_group)} group figure(s) + summary.")
+    n_mean = _fig_direction_means(dir_samples, p, out_dir)
+    io._log(f"[BurstLat] done - {len(by_group)} group figure(s), "
+            f"{len(by_group)} direction curve(s), {n_mean} mean curve(s) + summary.")
 
 
 # ==============================================================================
@@ -367,9 +527,14 @@ def _selftest():
             "spikes": [np.sort(np.array(spikes[l])) for l in labels],
             "duration": dur}
     st, fits = _window_stats(unit, p)
+    series = _burst_timecourse({"stim": (st, fits, (0.0, dur))}, p)
+    tb = [b["convergence_pct"] for b in series["bins"]]
+    print(f"  time course: {len(tb)} bin(s), convergence mean "
+          f"{np.mean(tb):.1f}% (planted ~100%)")
     dev = (st["mean_dir_deg"] - 135.0 + 180) % 360 - 180
     ok = (st["n_fits"] >= 30 and abs(dev) < 10 and st["R"] > 0.7
-          and abs(st["diag_delay_ms"] - 50.0) < 15.0)
+          and abs(st["diag_delay_ms"] - 50.0) < 15.0
+          and len(tb) >= 1 and np.mean(tb) > 90.0)
     print(f"  bursts fitted {st['n_fits']}/40  mean dir {st['mean_dir_deg']:.1f} "
           f"(planted 135)  R {st['R']:.2f}  diag delay {st['diag_delay_ms']:.1f} ms "
           f"(planted 50)")
