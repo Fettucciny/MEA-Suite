@@ -231,6 +231,18 @@ PHASE_LOCKIN = {
     #   the full post window everywhere. Needs a run (not just a replot) to take
     #   effect, because it is a separate fit. Range 0 - 1800.
     "post_map_window_s":    150.0,
+    # radial_model : spatial readout for radial (centre-out) groups.
+    #   "quadrant" (default, unchanged): plane-wave fit per quadrant about the
+    #     ring centre, each scored against its outward direction.
+    #   "spiral": the electrodes are ordered by their DISTANCE from the ring
+    #     centre (the spiral centre-out order) and the phase is read against
+    #     that 1-D coordinate exactly as the linear sweep reads it against the
+    #     sweep axis: matched filter P(k_r) = |sum w z e^{-i k_r r}| / sum w
+    #     over signed k_r. k_r > 0 = phase advances outward. The outward
+    #     contrast (P at +|k_r|* vs -|k_r|*, in [-1, +1]) replaces the linear
+    #     'alignment' and the convergence curve plots 50*(1+contrast). Adds a
+    #     phase-vs-radius figure (phase_radius_<group>.png). Needs a run.
+    "radial_model":         "quadrant",
     # exclude_fast_bursts : remove spontaneous network bursts before the lock-in.
     #   A spontaneous burst packs most of the array's firing into tens of ms,
     #   while the laser-driven wave spreads its spikes over the whole sweep
@@ -785,6 +797,146 @@ def quadrant_alignment(locks, period_s, pitch_um, min_phase_span_rad=0.6):
     return out
 
 
+def spiral_fit(locks, period_s, pitch_um, n_grid=241, min_phase_span_rad=0.6):
+    """Radial (spiral) analogue of fit_plane_wave: phase vs DISTANCE from the
+    ring centre. Matched filter over signed radial wavenumber k_r; k_r > 0 means
+    the preferred phase advances outward. Returns a dict or None (< 6 locks).
+
+      k_r_per_um         fitted signed radial wavenumber
+      coherence          P(k_r*) (same normalisation as the planar filter)
+      outward            k_r > 0
+      outward_contrast   (P(+|k_r|*) - P(-|k_r|*)) / (P(+|k_r|*) + P(-|k_r|*)),
+                         a continuous outward-vs-inward score in [-1, +1]
+      speed_um_per_s     2*pi / (|k_r| * T)
+      phase_span_rad     |k_r| * (r_max - r_min); flat below min_phase_span_rad
+      r_um / phase_rad / phi0_rad   per-electrode radius + phase and the fitted
+                         intercept, for the phase-vs-radius figure
+    """
+    if len(locks) < 6:
+        return None
+    cx, cy = _RADIAL_CENTRE_CELLS
+    w = np.array([np.sqrt(l.n) for l in locks]); ws = w.sum()
+    z = np.array([l.z for l in locks])
+    r = np.array([np.hypot(l.x_um - cx * pitch_um, l.y_um - cy * pitch_um)
+                  for l in locks])
+    k_max = np.pi / pitch_um
+    ks = np.linspace(-k_max, k_max, n_grid)
+    M = np.exp(-1j * np.outer(ks, r)) @ (w * z)          # (n_grid,)
+    Pk = np.abs(M) / ws
+    i0 = int(np.argmax(Pk))
+    k0 = float(ks[i0]); coh = float(Pk[i0])
+    if 0 < i0 < n_grid - 1:
+        pm, p0, pp = Pk[i0 - 1], Pk[i0], Pk[i0 + 1]
+        den = pm - 2 * p0 + pp
+        if den != 0:
+            k0 += 0.5 * (pm - pp) / den * (ks[1] - ks[0])
+        acc = (w * z) @ np.exp(-1j * k0 * r)
+        coh = float(abs(acc) / ws)
+    def _P(k):
+        return float(abs((w * z) @ np.exp(-1j * k * r))) / ws
+    p_out, p_in = _P(abs(k0)), _P(-abs(k0))
+    contrast = (p_out - p_in) / max(p_out + p_in, 1e-12)
+    acc = (w * z) @ np.exp(-1j * k0 * r)
+    span = float(abs(k0) * (r.max() - r.min()))
+    return {"k_r_per_um": float(k0), "coherence": coh,
+            "outward": bool(k0 > 0), "outward_contrast": float(contrast),
+            "speed_um_per_s": float(2 * np.pi / (abs(k0) * period_s))
+                              if abs(k0) > 1e-12 else float("inf"),
+            "phase_span_rad": span,
+            "flat": bool(span < float(min_phase_span_rad)),
+            "r_um": r, "phase_rad": np.angle(z), "weight": w,
+            "phi0_rad": float(np.angle(acc)),
+            "n_electrodes": len(locks), "centre_cells": (cx, cy)}
+
+
+def _spiral_summary_fields(sp, coherence_floor):
+    """Summary-CSV overrides for a radial row fitted with the spiral model.
+    The planar direction columns are blanked (wrong model on a ring); the
+    linear 'alignment' slot carries the outward contrast so the column keeps
+    one meaning: +1 = fully on the trained direction."""
+    row = {"pattern": "radial-spiral", "direction_deg": None, "p_value": None,
+           "propagation": (not sp["flat"]) if sp else None,
+           "n_quadrants": None,
+           "spiral_k_r_per_um": (round(sp["k_r_per_um"], 6) if sp else None),
+           "spiral_outward": (bool(sp["outward"]) if sp else None)}
+    if sp:
+        row.update(alignment=round(sp["outward_contrast"], 3),
+                   coherence=round(sp["coherence"], 3),
+                   phase_span_rad=round(sp["phase_span_rad"], 3),
+                   speed_um_per_s=(round(sp["speed_um_per_s"], 1)
+                                   if np.isfinite(sp["speed_um_per_s"]) else None))
+        row["low_confidence"] = bool(sp["flat"]
+                                     or sp["coherence"] < float(coherence_floor))
+    return row
+
+
+def _spiral_decor(ax, fit, pitch):
+    """Map/flow overlay for the spiral model: ring centre, two reference
+    circles, and an outward/inward verdict tag (the 1-D fit has no heading
+    arrow to draw)."""
+    sp = fit.get("spiral") or {}
+    cx, cy = sp.get("centre_cells", _RADIAL_CENTRE_CELLS)
+    ax.plot(cx, cy, "o", color="crimson", ms=4.5, zorder=7)
+    th = np.linspace(0, 2 * np.pi, 121)
+    for rr in (1.5, 3.0):
+        ax.plot(cx + rr * np.cos(th), cy + rr * np.sin(th), ls="--", lw=0.9,
+                color="crimson", alpha=0.55, zorder=4)
+    if sp:
+        tag = ("outward" if sp["outward"] else "INWARD")
+        _panel_tag(ax, f"spiral: {tag}  contrast {sp['outward_contrast']:+.2f}")
+
+
+def _draw_phase_radius_panel(ax, fit, sweep_deg, pitch):
+    """Preferred phase vs distance from the ring centre, with the fitted
+    spiral line — the radial analogue of phase advancing along the sweep axis."""
+    ax.set_facecolor("#FAFAFA")
+    ax.tick_params(labelsize=7, colors="#555")
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    if _no_lock(ax, fit):
+        return
+    sp = fit.get("spiral")
+    if not sp:
+        ax.text(0.5, 0.5, "no spiral fit", ha="center", va="center",
+                fontsize=8, color="#888", style="italic", transform=ax.transAxes)
+        return
+    r_c = sp["r_um"] / pitch
+    ph = np.degrees(sp["phase_rad"]) % 360.0
+    st, _smax = _norm_strengths(fit["locks"])
+    ax.scatter(r_c, ph, c=st, cmap=PARULA, norm=_NORM01, s=34,
+               edgecolors="k", linewidths=0.3, zorder=3)
+    rg = np.linspace(r_c.min(), r_c.max(), 300)
+    model = np.degrees(sp["phi0_rad"] + sp["k_r_per_um"] * rg * pitch) % 360.0
+    jump = np.abs(np.diff(model)) > 180.0
+    mm = model.copy()
+    mm[1:][jump] = np.nan
+    ax.plot(rg, mm, color="crimson", ls="--", lw=1.4, zorder=4)
+    ax.set_xlabel("distance from ring centre (pitch)", fontsize=7.5, color="#555")
+    ax.set_ylabel("preferred phase (deg)", fontsize=7.5, color="#555")
+    ax.set_ylim(-10, 370)
+    ax.set_yticks([0, 90, 180, 270, 360])
+    _panel_tag(ax, f"k_r {'+' if sp['outward'] else '-'}  coh {sp['coherence']:.2f}  "
+                   f"contrast {sp['outward_contrast']:+.2f}")
+
+
+def _fig_group_phase_radius(group, samples, p, out_dir):
+    """phase_radius_<group>.png — only for radial groups run with the spiral
+    model; same day-strip grid as the other figures."""
+    if not any(fit and fit.get("spiral")
+               for _s, res, _a in samples for fit in res.values()
+               if isinstance(fit, dict)):
+        return False
+    _grid_figure(
+        group, samples, p, out_dir, _draw_phase_radius_panel,
+        f"phase_radius_{group}.png",
+        f"Radial spiral phase — group {group}   (rows = training days, "
+        f"youngest at top; each dot = one electrode's preferred phase vs its "
+        f"distance from the ring centre, colour = relative lock strength; "
+        f"crimson dashed = fitted spiral k_r, positive slope = outward)",
+        "relative lock strength (per-panel 0–1)")
+    return True
+
+
 def _radial_summary_fields(rad, coherence_floor):
     """Summary-CSV overrides for a radial row. The whole-array plane-wave
     numbers (direction, phase span, p-value) describe the wrong model on a ring
@@ -867,6 +1019,9 @@ def _draw_panel(ax, fit, sweep_deg, pitch):
     st, smax = _norm_strengths(locks)
     ax.scatter(xs, ys, c=st, cmap=PARULA, norm=_NORM01,
                s=90, edgecolors="k", linewidths=0.4, zorder=3)
+    if fit.get("spiral") is not None:          # radial run: spiral model
+        _spiral_decor(ax, fit, pitch)
+        return
     if fit.get("radial") is not None:          # radial run: quadrant model
         _quadrant_decor(ax, fit)
         return
@@ -928,6 +1083,9 @@ def _draw_flow_panel(ax, fit, sweep_deg, pitch):
     ax.scatter(np.array([l.x_um for l in locks]) / pitch,
                np.array([l.y_um for l in locks]) / pitch,
                s=8, c="#333", alpha=0.35, zorder=2)
+    if fit.get("spiral") is not None:          # radial run: spiral model
+        _spiral_decor(ax, fit, pitch)
+        return
     if fit.get("radial") is not None:          # radial run: quadrant model
         _quadrant_decor(ax, fit, lw=2.0)
         return
@@ -1213,6 +1371,19 @@ def _direction_timecourse(by_region, results, p, seed_T, radial=False):
             b0, b1 = b * win_s, (b + 1) * win_s
             locks = electrode_locking(spike_s, b0, b1, period, label_xy,
                                       min_spikes)
+            if radial and str(p.get("radial_model", "quadrant")).lower() == "spiral":
+                sp = spiral_fit(locks, period, pitch,
+                                min_phase_span_rad=p.get("min_phase_span_rad", 0.6))
+                if sp is None:
+                    continue
+                bins.append({"t_mid_s": t_off + 0.5 * (b0 + b1),
+                             "direction_deg": 0.0 if sp["outward"] else 180.0,
+                             "convergence_pct": float(
+                                 50.0 * (1.0 + sp["outward_contrast"])),
+                             "coherence": sp["coherence"],
+                             "n_locked": len(locks),
+                             "region": region})
+                continue
             if radial:
                 qa = quadrant_alignment(locks, period, pitch,
                                         p.get("min_phase_span_rad", 0.6))
@@ -1685,11 +1856,16 @@ def _analyse_stem(stem, units, p, seed_T, progress=None):
             fit = {"ok": False, "reason": f"error:{e!r}"[:40]}
         if is_radial and fit.get("ok"):
             try:
-                fit["radial"] = quadrant_alignment(
-                    fit["locks"], fit["period_s"], p["pitch_um"],
-                    p.get("min_phase_span_rad", 0.6))
+                if str(p.get("radial_model", "quadrant")).lower() == "spiral":
+                    fit["spiral"] = spiral_fit(
+                        fit["locks"], fit["period_s"], p["pitch_um"],
+                        min_phase_span_rad=p.get("min_phase_span_rad", 0.6))
+                else:
+                    fit["radial"] = quadrant_alignment(
+                        fit["locks"], fit["period_s"], p["pitch_um"],
+                        p.get("min_phase_span_rad", 0.6))
             except Exception as e:
-                logs.append(f"  [PhaseLock] {stem} [{region}]: quadrant "
+                logs.append(f"  [PhaseLock] {stem} [{region}]: radial "
                             f"model failed ({e!r})")
         results[region] = fit
         if region == "stim" and fit.get("ok"):
@@ -1712,7 +1888,10 @@ def _analyse_stem(stem, units, p, seed_T, progress=None):
                 "p_value": fit.get("p_value"),
                 "low_confidence": bool(fit.get("low_confidence", False)),
             })
-            if fit.get("radial") is not None:
+            if fit.get("spiral") is not None:
+                rows[-1].update(_spiral_summary_fields(
+                    fit["spiral"], p.get("coherence_floor", 0.10)))
+            elif fit.get("radial") is not None:
                 rows[-1].update(_radial_summary_fields(
                     fit["radial"], p.get("coherence_floor", 0.10)))
     # first-N-seconds post fit for the map / flow / compass panels
@@ -1731,12 +1910,17 @@ def _analyse_stem(stem, units, p, seed_T, progress=None):
             fit = {"ok": False, "reason": f"error:{e!r}"[:40]}
         if is_radial and fit.get("ok"):
             try:
-                fit["radial"] = quadrant_alignment(
-                    fit["locks"], fit["period_s"], p["pitch_um"],
-                    p.get("min_phase_span_rad", 0.6))
+                if str(p.get("radial_model", "quadrant")).lower() == "spiral":
+                    fit["spiral"] = spiral_fit(
+                        fit["locks"], fit["period_s"], p["pitch_um"],
+                        min_phase_span_rad=p.get("min_phase_span_rad", 0.6))
+                else:
+                    fit["radial"] = quadrant_alignment(
+                        fit["locks"], fit["period_s"], p["pitch_um"],
+                        p.get("min_phase_span_rad", 0.6))
             except Exception as e:
                 logs.append(f"  [PhaseLock] {stem} [post, first {win:g}s]: "
-                            f"quadrant model failed ({e!r})")
+                            f"radial model failed ({e!r})")
         fit["window_s"] = win
         results[_POST_EARLY] = fit
         if fit.get("ok"):
@@ -1757,7 +1941,10 @@ def _analyse_stem(stem, units, p, seed_T, progress=None):
                 "p_value": fit.get("p_value"),
                 "low_confidence": bool(fit.get("low_confidence", False)),
             })
-            if fit.get("radial") is not None:
+            if fit.get("spiral") is not None:
+                rows[-1].update(_spiral_summary_fields(
+                    fit["spiral"], p.get("coherence_floor", 0.10)))
+            elif fit.get("radial") is not None:
                 rows[-1].update(_radial_summary_fields(
                     fit["radial"], p.get("coherence_floor", 0.10)))
 
@@ -1920,6 +2107,11 @@ def _render_results(cache, root):
             n_figs += 1
         except Exception as e:
             io._log(f"  [PhaseLock] group {grp}: direction figure failed ({e!r})")
+        try:
+            if _fig_group_phase_radius(grp, samples, p, root):
+                n_figs += 1
+        except Exception as e:
+            io._log(f"  [PhaseLock] group {grp}: phase-radius figure failed ({e!r})")
     try:
         n_figs += _fig_direction_means(dir_samples, p, root)
     except Exception as e:
