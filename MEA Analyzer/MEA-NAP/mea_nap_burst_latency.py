@@ -77,8 +77,10 @@ BURST_LATENCY = {
     #   50*(1+cos(theta_b - sweep)) of the travelling bursts inside it. Range
     #   30 - 600.
     "direction_window_s":   60.0,
-    # min_bursts_per_bin : fitted bursts a bin needs to be drawn (fewer = the
-    #   bin is left as a gap, like the lock-in's under-populated bins). Range 1 - 20.
+    # min_bursts_per_bin : fitted bursts a bin needs to be drawn at FULL opacity;
+    #   bins with fewer (down to 1) are still drawn, faded, so sparse stretches
+    #   stay visible but readable as low-confidence. Bins with ZERO travelling
+    #   bursts have no direction at all and remain gaps. Range 1 - 20.
     "min_bursts_per_bin":   3,
 }
 
@@ -267,23 +269,138 @@ def _burst_timecourse(regions, p):
         for b in range(int(np.floor(dur / win_s))):
             sel = (t >= b * win_s) & (t < (b + 1) * win_s)
             n = int(sel.sum())
-            if n < min_n:
-                continue
+            if n < 1:
+                continue                      # no travelling burst = no direction
             Rv = np.exp(1j * np.radians(th[sel])).mean()
             bins.append({"t_mid_s": t_off + (b + 0.5) * win_s,
                          "direction_deg": float(np.degrees(np.angle(Rv))),
                          "convergence_pct": float(conv[sel].mean()),
                          "sem": (float(conv[sel].std(ddof=1) / np.sqrt(n))
                                  if n > 1 else None),
-                         "coherence": float(abs(Rv)),   # colour = consistency R
+                         "coherence": float(abs(Rv)),   # consistency R (CSV/debug)
+                         "weak": bool(n < min_n),
                          "n_locked": n, "region": region})
     bands.sort(key=lambda x: x[0])
     bins.sort(key=lambda d: d["t_mid_s"])
     return {"bins": bins, "bands": bands, "window_s": win_s, "mode": "linear"}
 
 
+def _draw_direction_axes_plain(ax, series, p, label_bands=False):
+    """Burst-travel convergence row: one plain colour, raw unsmoothed line.
+    Bins flagged weak (fewer than min_bursts_per_bin travelling bursts) and the
+    segments touching them are drawn faded so sparse stretches read as
+    low-confidence instead of disappearing."""
+    sweep = float(p["sweep_angle_deg"])
+    LINE = plt.get_cmap("Blues")(0.92)
+    ax.set_facecolor("#FAFAFA")
+    ax.tick_params(labelsize=8, colors="#555")
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color("#CCCCCC")
+    bands = (series or {}).get("bands") or []
+    bins = (series or {}).get("bins") or []
+    if not bands:
+        ax.text(0.5, 0.5, "no windows", ha="center", va="center", fontsize=9,
+                color="#888", style="italic", transform=ax.transAxes)
+        ax.set_xticks([]); ax.set_yticks([])
+        return
+    t_lo = min(b[0] for b in bands) / 60.0
+    t_hi = max(b[1] for b in bands) / 60.0
+    ax.set_xlim(t_lo, t_hi)
+    ax.set_ylim(-4.0, 114.0)
+    ax.set_yticks([0, 25, 50, 75, 100])
+    ax.set_yticklabels(["0%", "25%", "50%", "75%", "100%"])
+    ax.set_ylabel("convergence on training angle", fontsize=8.5, color="#555")
+    ax.grid(axis="y", color="#E2E2E2", lw=0.7, zorder=0)
+    ax.set_axisbelow(True)
+    for (bt0, bt1, region) in bands:
+        ax.axvspan(bt0 / 60.0, bt1 / 60.0, color=pl._region_fill(region), lw=0,
+                   zorder=1)
+        ax.axvline(bt0 / 60.0, color="#BFCBD8", lw=0.8, zorder=2)
+        if label_bands:
+            ax.text(0.5 * (bt0 + bt1) / 60.0, 112.0, str(region),
+                    ha="center", va="top", fontsize=8.5, fontweight="bold",
+                    color=pl._region_ink(region), zorder=5)
+    ax.axhline(100.0, color="crimson", lw=1.2, ls="--", alpha=0.85, zorder=3)
+    ax.text(t_hi, 100.0, f" sweep {sweep:.0f}°", fontsize=7,
+            color="crimson", va="bottom", ha="right", zorder=5)
+    if not bins:
+        ax.text(0.5, 0.5, "no travelling bursts", ha="center", va="center",
+                fontsize=9, color="#888", style="italic",
+                transform=ax.transAxes, zorder=6)
+        return
+    t = np.array([b["t_mid_s"] for b in bins], float) / 60.0
+    y = np.clip(np.array([b["convergence_pct"] for b in bins], float), 0, 100)
+    weak = np.array([bool(b.get("weak")) for b in bins])
+    win_min = float(series.get("window_s", 60.0)) / 60.0
+    sem = np.array([float(b.get("sem") or 0.0) for b in bins], float)
+    has = np.array([(b.get("sem") is not None) for b in bins])
+    for sel, alpha in ((has & ~weak, 0.9), (has & weak, 0.3)):
+        if sel.any():
+            ax.errorbar(t[sel], y[sel], yerr=sem[sel], fmt="none",
+                        ecolor="#7A8694", elinewidth=1.0, capsize=2.2,
+                        capthick=0.9, alpha=alpha, zorder=4)
+    # raw unsmoothed segments; a segment is faded if either endpoint is weak,
+    # and broken where more than ~1.5 bin widths are missing
+    pts = np.column_stack([t, y]).reshape(-1, 1, 2)
+    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+    ok = np.diff(t) <= 1.5 * win_min
+    seg_weak = weak[:-1] | weak[1:]
+    for sel, alpha in ((ok & ~seg_weak, 1.0), (ok & seg_weak, 0.28)):
+        if sel.any():
+            lc = pl._LineCollection(segs[sel], colors=[LINE], linewidths=1.6,
+                                    capstyle="round", zorder=5, alpha=alpha)
+            ax.add_collection(lc)
+    if weak.any():
+        ax.plot(t[weak], y[weak], "o", ms=2.6, color=LINE, alpha=0.35, zorder=5)
+
+
+def _mean_timecourse(members, win_s, min_n):
+    """Average replicate series bin-by-bin (same (region, bin-index) alignment
+    as the phase lock-in's) while summing the burst counts, so the mean bin can
+    be flagged weak when its members held few travelling bursts in total."""
+    acc, t0s, durs = {}, {}, {}
+    for sr in members:
+        starts = {}
+        for (bt0, bt1, region) in sr["bands"]:
+            starts[region] = bt0
+            t0s.setdefault(region, []).append(bt0)
+            durs.setdefault(region, []).append(bt1 - bt0)
+        for b in sr["bins"]:
+            r = b["region"]
+            if r not in starts:
+                continue
+            k = int(round((b["t_mid_s"] - starts[r]) / win_s - 0.5))
+            acc.setdefault((r, k), []).append(
+                (b["convergence_pct"], int(b.get("n_locked", 0))))
+    regions = sorted(t0s, key=lambda r: float(np.median(t0s[r])))
+    bands = [(float(np.median(t0s[r])),
+              float(np.median(t0s[r]) + np.median(durs[r])), r)
+             for r in regions]
+    span = {r: (a, b) for (a, b, r) in bands}
+    bins = []
+    for (r, k), vals in acc.items():
+        a, b = span[r]
+        tm = a + (k + 0.5) * win_s
+        if not (a <= tm <= b):
+            continue
+        conv = np.array([v[0] for v in vals], float)
+        n_bursts = int(sum(v[1] for v in vals))
+        n = conv.size
+        bins.append({"t_mid_s": tm, "region": r, "n": n,
+                     "convergence_pct": float(conv.mean()),
+                     "sem": (float(conv.std(ddof=1) / np.sqrt(n)) if n > 1
+                             else None),
+                     "coherence": 0.0,
+                     "weak": bool(n_bursts < min_n),
+                     "n_locked": n_bursts})
+    bins.sort(key=lambda d: d["t_mid_s"])
+    return {"bins": bins, "bands": bands, "window_s": win_s, "mode": "linear"}
+
+
 def _fig_group_direction(group, samples, p, out_dir):
-    """burst_direction_<group>.png — rows = samples, pl drawing machinery.
+    """burst_direction_<group>.png — rows = samples, plain raw lines.
     samples : [(stem, series, age), ...]"""
     samples = [t for t in samples if t[1] and t[1].get("bands")]
     samples = sorted(samples, key=lambda t: (t[2] if t[2] is not None else 1e9,
@@ -298,27 +415,20 @@ def _fig_group_direction(group, samples, p, out_dir):
         pl._day_strip(fig.add_subplot(gs[i, 0]), i, nr, stem, age)
         ax = fig.add_subplot(gs[i, 1])
         try:
-            pl._draw_direction_axes(ax, series, p, label_bands=(i == 0))
+            _draw_direction_axes_plain(ax, series, p, label_bands=(i == 0))
         except Exception as e:                       # never lose the figure
             ax.text(0.5, 0.5, f"row failed\n{e!r}"[:70], fontsize=7,
                     ha="center", va="center", color="crimson",
                     transform=ax.transAxes)
         if i == nr - 1:
             ax.set_xlabel("session time (min)", fontsize=9, color="#555")
-        sm = pl._ScalarMappable(norm=pl._NORM01, cmap=pl.PARULA)
-        sm.set_array([])
-        cb = fig.colorbar(sm, ax=[ax], location="right", fraction=0.025,
-                          pad=0.01)
-        cb.set_ticks([0.0, 0.5, 1.0])
-        cb.ax.tick_params(labelsize=6)
-        cb.set_label("burst-direction consistency R (0–1)", fontsize=7)
     fig.suptitle(
         f"Burst-travel convergence over time — group {group}   (rows = "
         f"training days, youngest at top; each bin = mean convergence of the "
         f"travelling bursts inside {win_s:g} s on sweep "
         f"{float(p['sweep_angle_deg']):.0f}°; bars = ±1 SEM across "
-        f"bursts, colour = direction consistency R; gaps = bins with "
-        f"< {int(p.get('min_bursts_per_bin', 3))} travelling bursts)",
+        f"bursts; FADED = bins with < {int(p.get('min_bursts_per_bin', 3))} "
+        f"travelling bursts; gaps = none at all)",
         fontsize=11)
     pl._save(fig, os.path.join(out_dir, f"burst_direction_{group}.png"))
 
@@ -345,32 +455,28 @@ def _fig_direction_means(dir_samples, p, out_dir):
         fig = plt.figure(figsize=(13.0, 2.7 * nr + 0.9),
                          constrained_layout=True)
         gs = fig.add_gridspec(nr, 2, width_ratios=[0.18, 1])
+        min_n = int(p.get("min_bursts_per_bin", 3))
         for i, day in enumerate(order):
             members = days[day]
-            mean = pl._mean_timecourse([m[0] for m in members], win_s)
+            mean = _mean_timecourse([m[0] for m in members], win_s, min_n)
             pl._mean_day_strip(fig.add_subplot(gs[i, 0]), i, nr, day,
                                len(members), [m[1] for m in members])
             ax = fig.add_subplot(gs[i, 1])
             try:
-                pl._draw_direction_axes(ax, mean, p, label_bands=(i == 0))
+                _draw_direction_axes_plain(ax, mean, p, label_bands=(i == 0))
             except Exception as e:
                 ax.text(0.5, 0.5, f"row failed\n{e!r}"[:70], fontsize=7,
                         ha="center", va="center", color="crimson",
                         transform=ax.transAxes)
             if i == nr - 1:
                 ax.set_xlabel("session time (min)", fontsize=9, color="#555")
-            sm = pl._ScalarMappable(norm=pl._NORM01, cmap=pl.PARULA)
-            sm.set_array([])
-            cb = fig.colorbar(sm, ax=[ax], location="right", fraction=0.025,
-                              pad=0.01)
-            cb.set_ticks([0.0, 0.5, 1.0])
-            cb.ax.tick_params(labelsize=6)
-            cb.set_label("mean consistency R (0–1)", fontsize=7)
         fig.suptitle(
             f"Burst-travel convergence over time — {cond}, mean of samples"
             f"   (rows = training days; bars = ±1 SEM across samples; "
             f"bins of {win_s:g} s, scored on sweep "
-            f"{float(p['sweep_angle_deg']):.0f}°)",
+            f"{float(p['sweep_angle_deg']):.0f}°; FADED = fewer than "
+            f"{int(p.get('min_bursts_per_bin', 3))} travelling bursts in the "
+            f"bin across samples; gaps = none at all)",
             fontsize=11)
         pl._save(fig, os.path.join(out_dir,
                                    f"burst_direction_mean_{cond}.png"))

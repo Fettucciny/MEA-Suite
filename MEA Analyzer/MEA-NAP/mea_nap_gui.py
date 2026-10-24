@@ -263,7 +263,7 @@ PARAM_HELP = {
     "PSD_TREND.burst_rate_factor": "Fast-burst event threshold (× median pooled 10 ms rate); same definition as the phase lock-in filter and Burst Latency.",
     "PSD_TREND.burst_max_dur_s": "Events longer than this are not counted as network bursts.",
     "BURST_LATENCY.direction_window_s": "Bin width for the burst-travel convergence curve (burst_direction_<group>.png): each bin averages the per-burst convergences of the travelling bursts inside it, like the phase lock-in's convergence-over-time plot.",
-    "BURST_LATENCY.min_bursts_per_bin": "Bins with fewer travelling bursts are left as gaps instead of being drawn from too little data.",
+    "BURST_LATENCY.min_bursts_per_bin": "Bins with fewer travelling bursts than this are drawn FADED (low confidence) instead of full opacity; bins with no travelling burst at all stay gaps.",
     "BURST_LATENCY.burst_rate_factor": "Pooled-rate threshold (× the median 10 ms-binned rate) at which a fast-burst event starts; same definition as the phase lock-in's burst filter.",
     "BURST_LATENCY.burst_max_dur_s": "Events longer than this are not network bursts and are skipped.",
     "BURST_LATENCY.tail_s": "The first-spike latency window extends this far past the event end so trailing-edge electrodes still count.",
