@@ -57,6 +57,8 @@ import mea_nap_original_plots as orig
 import mea_nap_spectral_propagation as spprop
 import mea_nap_spkit_egm as spkit_egm
 import mea_nap_phase_lockin as phase_lockin
+import mea_nap_burst_latency as burst_latency
+import mea_nap_psd_trend as psd_trend
 import mea_nap_digital_events as digital
 import mea_nap_progress as progress_gui
 import mea_theme
@@ -252,6 +254,21 @@ PARAM_HELP = {
     "PHASE_LOCKIN.exclude_fast_bursts": "Remove spontaneous network bursts before the lock-in: events where the pooled 10 ms firing rate exceeds the threshold and that last less than the max duration. A synchronous burst packs the array's firing into tens of ms; the laser-driven wave spreads over the whole sweep cycle and is never removed. Cleans the stim-period lock (bursts dilute it); needs a run, not a replot.",
     "PHASE_LOCKIN.burst_rate_factor": "Pooled-rate threshold, as a multiple of the median 10 ms-binned rate, at which a fast-burst event starts (it extends until the rate falls back below 1.5× median).",
     "PHASE_LOCKIN.burst_max_dur_s": "Only events shorter than this count as spontaneous bursts and are removed; longer excursions are kept as potentially stimulus-driven.",
+    "PSD_TREND.bin_s": "Bin width for the pooled array firing rate; 0.05 s gives a 20 Hz sampling rate (sees rhythms up to 10 Hz).",
+    "PSD_TREND.welch_nperseg": "Welch segment length in rate samples; longer = finer frequency resolution, needs a longer window (auto-shortened for short windows).",
+    "PSD_TREND.fmax_hz": "Highest frequency drawn in the per-day PSD overlay.",
+    "PSD_TREND.peak_lo_hz": "Lower edge of the band searched for the dominant slow (bursting) PSD peak.",
+    "PSD_TREND.peak_hi_hz": "Upper edge of the peak-search band.",
+    "PSD_TREND.burst_rate_factor": "Fast-burst event threshold (× median pooled 10 ms rate); same definition as the phase lock-in filter and Burst Latency.",
+    "PSD_TREND.burst_max_dur_s": "Events longer than this are not counted as network bursts.",
+    "BURST_LATENCY.burst_rate_factor": "Pooled-rate threshold (× the median 10 ms-binned rate) at which a fast-burst event starts; same definition as the phase lock-in's burst filter.",
+    "BURST_LATENCY.burst_max_dur_s": "Events longer than this are not network bursts and are skipped.",
+    "BURST_LATENCY.tail_s": "The first-spike latency window extends this far past the event end so trailing-edge electrodes still count.",
+    "BURST_LATENCY.min_lat_electrodes": "Electrodes that must fire within a burst for its latency plane to be fitted.",
+    "BURST_LATENCY.min_fit_r2": "Minimum R² of the latency plane for a burst to count as travelling; incoherent bursts are dropped.",
+    "BURST_LATENCY.min_fits": "A window needs at least this many fitted (travelling) bursts before its mean direction appears in the summary figure; all windows reach the CSV.",
+    "BURST_LATENCY.pitch_um": "Inter-electrode spacing (µm); sets the speed scale and the corner-to-corner delay (MCS 60-MEA = 200).",
+    "BURST_LATENCY.sweep_angle_deg": "The trained axis the burst directions are scored against (BR→TL = 135).",
     "PHASE_LOCKIN.null_model": "'rotation' (original) randomises each electrode's preferred phase: it rejects whenever phases are not independent, which synchronous bursting alone causes (every pre/post/control window hit the p floor on the Oct-2026 batch). 'position' shuffles electrode positions while each keeps its own resultant: the common-phase (k=0) part is unchanged, so only a spatially organised (travelling) phase pattern is significant.",
     "PHASE_LOCKIN.pitch_um": "Inter-electrode spacing (µm); sets the spatial Nyquist limit and the speed scale (MCS 60-MEA = 200 µm).",
     "PHASE_LOCKIN.sweep_angle_deg": "Nominal sweep axis (135° = bottom-right → top-left), used for the per-panel alignment score (cos of the angle between recovered heading and the sweep axis).",
@@ -339,6 +356,8 @@ def build_schema():
     CVF = spprop.CVFIELD_PARAMS
     SE = spkit_egm.SPKIT_EGM
     PLK = phase_lockin.PHASE_LOCKIN
+    BL = burst_latency.BURST_LATENCY
+    PT = psd_trend.PSD_TREND
     DE = digital.DIGITAL_PARAMS
     SC = digital.SWEEP_CALIB
     return [
@@ -664,6 +683,39 @@ def build_schema():
                "0 = full post; 30 – 1800  (needs a run)"),
             _P(PLK, "PHASE_LOCKIN", "direction_smooth_bins", "Direction smoothing (bins)",
                "float", "0.5 – 10  (plot-only: Replot applies it)"),
+        ]),
+        ("Burst Latency", [
+            _P(BL, "BURST_LATENCY", "burst_rate_factor", "Burst rate threshold (× median)",
+               "float", "2 – 10"),
+            _P(BL, "BURST_LATENCY", "burst_max_dur_s", "Burst max duration (s)", "float",
+               "0.1 – 1.0"),
+            _P(BL, "BURST_LATENCY", "tail_s", "Latency tail after event (s)", "float",
+               "0 – 0.2"),
+            _P(BL, "BURST_LATENCY", "min_lat_electrodes", "Min electrodes per burst",
+               "int", "6 – 40"),
+            _P(BL, "BURST_LATENCY", "min_fit_r2", "Min plane-fit R²", "float", "0 – 0.9"),
+            _P(BL, "BURST_LATENCY", "min_fits", "Min fitted bursts (summary)", "int",
+               "1 – 100"),
+            _P(BL, "BURST_LATENCY", "pitch_um", "Electrode pitch (um)", "float",
+               "100 – 700"),
+            _P(BL, "BURST_LATENCY", "sweep_angle_deg", "Sweep axis (deg, BR->TL)",
+               "float", "0 – 360"),
+        ]),
+        ("PSD Trends", [
+            _P(PT, "PSD_TREND", "bin_s", "Population-rate bin (s)", "float",
+               "0.02 – 0.2"),
+            _P(PT, "PSD_TREND", "welch_nperseg", "Welch segment (samples)", "int",
+               "256 – 8192"),
+            _P(PT, "PSD_TREND", "fmax_hz", "Overlay max frequency (Hz)", "float",
+               "0.5 – 10"),
+            _P(PT, "PSD_TREND", "peak_lo_hz", "Peak search low (Hz)", "float",
+               "0.005 – 1"),
+            _P(PT, "PSD_TREND", "peak_hi_hz", "Peak search high (Hz)", "float",
+               "0.05 – 5"),
+            _P(PT, "PSD_TREND", "burst_rate_factor", "Burst rate threshold (× median)",
+               "float", "2 – 10"),
+            _P(PT, "PSD_TREND", "burst_max_dur_s", "Burst max duration (s)", "float",
+               "0.1 – 1.0"),
         ]),
     ]
 
@@ -1006,6 +1058,15 @@ class App(QtWidgets.QMainWindow):
          "whether the network locks to (and remembers) the laser sweep. Groups "
          "named radial* use the quadrant model for the centre-out ring. Writes to "
          "the 'Phase Lock' folder."),
+        ("burstlat",    "Burst latency (propagation)",
+         "Fits a latency plane to every fast network burst and asks whether the "
+         "bursts travel along the trained direction (a ~50 ms corner-to-corner "
+         "delay the phase lock-in cannot see). Writes to the 'Burst Latency' "
+         "folder."),
+        ("psdtrend",    "PSD trends (bursting rhythm)",
+         "Population-rate power spectra and fast-burst rate / frequency per "
+         "window, compared across training days (did stimulation change the "
+         "spontaneous bursting rhythm?). Writes to the 'PSD Trends' folder."),
     ]
 
     def __init__(self):
@@ -1265,7 +1326,7 @@ class App(QtWidgets.QMainWindow):
         except Exception:
             pass
         order = [progress_gui, det, digital, orig, spprop, io,
-                 phase_lockin, spkit_egm, activity]
+                 phase_lockin, burst_latency, psd_trend, spkit_egm, activity]
         ok, bad = [], []
         for m in order:
             try:
@@ -1439,6 +1500,8 @@ class App(QtWidgets.QMainWindow):
             "comparisons": bool(activity.STAGE2_SECTIONS.get("comparisons", True)),
             "spkit":       bool(spkit_egm.SPKIT_EGM.get("enable", False)),
             "phase":       bool(phase_lockin.PHASE_LOCKIN.get("enable", False)),
+            "burstlat":    bool(burst_latency.BURST_LATENCY.get("enable", False)),
+            "psdtrend":    bool(psd_trend.PSD_TREND.get("enable", False)),
         }
         self.section_vars = {}
         for i, (key, label, help_txt) in enumerate(self._SECTION_DEFS):
@@ -2028,6 +2091,8 @@ class App(QtWidgets.QMainWindow):
         activity.MEANAP_ORIGINAL_PLOTS = bool(sv["meanap"].get())
         spkit_egm.SPKIT_EGM["enable"]  = bool(sv["spkit"].get())
         phase_lockin.PHASE_LOCKIN["enable"] = bool(sv["phase"].get())
+        burst_latency.BURST_LATENCY["enable"] = bool(sv["burstlat"].get())
+        psd_trend.PSD_TREND["enable"] = bool(sv["psdtrend"].get())
         for skey, (var, spec) in self.pvars.items():
             try:
                 val = _parse(spec, var)
@@ -2060,7 +2125,9 @@ class App(QtWidgets.QMainWindow):
         do2 = any(activity.STAGE2_SECTIONS.values())
         do3 = bool(spkit_egm.SPKIT_EGM.get("enable"))
         do4 = bool(phase_lockin.PHASE_LOCKIN.get("enable"))
-        if not (do1 or do2 or do3 or do4):
+        do5 = bool(burst_latency.BURST_LATENCY.get("enable"))
+        do6 = bool(psd_trend.PSD_TREND.get("enable"))
+        if not (do1 or do2 or do3 or do4 or do5 or do6):
             self._info("Nothing to run",
                        "Check at least one analysis in the “Analyses to run” panel.")
             return
@@ -2072,7 +2139,7 @@ class App(QtWidgets.QMainWindow):
                           "Stage 1 is enabled but no group is checked for spike "
                           "detection. Enable at least one group, or turn off Stage 1.")
                 return
-            if (do2 or do4) and not ana_on:
+            if (do2 or do4 or do5 or do6) and not ana_on:
                 self._err("No groups for analysis",
                           "An analysis stage is enabled but no group is checked for "
                           "analysis. Enable at least one group, or turn off the "
@@ -2088,7 +2155,7 @@ class App(QtWidgets.QMainWindow):
         self.groups_btn.setEnabled(False)
         self.replot_btn.setEnabled(False)
         self.status_var.set("Running…")
-        threading.Thread(target=self._worker, args=(do1, do2, do3, do4),
+        threading.Thread(target=self._worker, args=(do1, do2, do3, do4, do5, do6),
                          daemon=True).start()
 
     # ---- replot from cached results ------------------------------------------
@@ -2157,7 +2224,7 @@ class App(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-    def _worker(self, do1, do2, do3=False, do4=False):
+    def _worker(self, do1, do2, do3=False, do4=False, do5=False, do6=False):
         import time
         old_out, old_err = sys.stdout, sys.stderr
         sys.stdout = _QueueWriter(self.q)
@@ -2184,6 +2251,16 @@ class App(QtWidgets.QMainWindow):
                 print("\n===== Phase Lock-In: sweep phase propagation =====")
                 _t = time.perf_counter(); phase_lockin.run_phase_lockin()
                 timings.append(("Phase Lock-In", time.perf_counter() - _t))
+            if do5:
+                self.q.put(("status", "Burst latency: network-burst propagation…"))
+                print("\n===== Burst latency: network-burst propagation =====")
+                _t = time.perf_counter(); burst_latency.run_burst_latency()
+                timings.append(("Burst latency", time.perf_counter() - _t))
+            if do6:
+                self.q.put(("status", "PSD trends: bursting rhythm by day…"))
+                print("\n===== PSD trends: bursting rhythm by day =====")
+                _t = time.perf_counter(); psd_trend.run_psd_trend()
+                timings.append(("PSD trends", time.perf_counter() - _t))
             if timings:
                 print("\n===== TIMING SUMMARY =====")
                 for name, dt in timings:

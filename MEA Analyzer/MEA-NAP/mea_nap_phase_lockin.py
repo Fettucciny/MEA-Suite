@@ -1550,8 +1550,19 @@ def fast_burst_mask(spikes_list, dur_s, enter_k=4.0, max_dur_s=0.3):
     n = max(2, int(np.ceil(dur_s / _BURST_BIN_S)))
     r, _ = np.histogram(t, bins=n, range=(0, n * _BURST_BIN_S))
     med = max(float(np.median(r)), 1e-9)
-    hi = r > enter_k * med
-    lo = r > _BURST_EXIT_K * med
+    if med >= 1.0:
+        # occupied recording: the original multiple-of-median thresholds, unchanged
+        # (bit-identical events to the formula this filter shipped with; verified
+        # on every MEA 100926 window, whose medians are >= 2 spikes/bin).
+        hi = r > enter_k * med
+        lo = r > _BURST_EXIT_K * med
+    else:
+        # DEGENERATE window (median bin EMPTY): a multiple of a zero median would
+        # flag every occupied bin as a burst, so fall back to a Poisson floor --
+        # enter at a ~5-sigma excursion of the mean rate, exit at ~2 sigma.
+        mean = float(r.mean())
+        hi = r > max(enter_k * med, mean + 5.0 * np.sqrt(mean + 1e-9))
+        lo = r > max(_BURST_EXIT_K * med, mean + 2.0 * np.sqrt(mean + 1e-9))
     out, i = [], 0
     while i < n:
         if hi[i]:
