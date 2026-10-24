@@ -121,6 +121,34 @@ def _fit_latency_plane(lat_ms, labels, pitch, min_n, min_r2):
             "cv_um_ms": 1.0 / g, "r2": r2, "n": int(lat.size)}
 
 
+def _fit_latency_radial(lat_ms, labels, pitch, min_n, min_r2):
+    """Radial-group fit: least-squares LINE latency(r), r = distance from the
+    ring centre (the spiral centre-out ordering collapsed to its 1-D
+    coordinate). An outward-travelling burst gives a clean positive slope.
+    Returns dict(corr, r2, speed_um_ms, span_delay_ms, n) or None.
+    corr = sign(slope) * sqrt(R^2) in [-1, +1]: +1 clean outward, -1 inward."""
+    cx, cy = pl._RADIAL_CENTRE_CELLS
+    keep, pos = _positions(labels, pitch)
+    sel = [(l, q) for l, q in zip(keep, pos) if l in lat_ms]
+    if len(sel) < min_n:
+        return None
+    r = np.array([np.hypot(q[0] - cx * pitch, q[1] - cy * pitch)
+                  for _l, q in sel])
+    lat = np.array([lat_ms[l] for l, _q in sel], float)
+    A = np.column_stack([r, np.ones(r.size)])
+    coef, *_ = np.linalg.lstsq(A, lat, rcond=None)
+    a, _c = coef
+    pred = A @ coef
+    sst = float(np.sum((lat - lat.mean()) ** 2))
+    r2 = 1 - float(np.sum((lat - pred) ** 2)) / sst if sst > 0 else 0.0
+    if r2 < min_r2 or abs(a) <= 0:
+        return None
+    return {"corr": float(np.sign(a) * np.sqrt(r2)), "r2": float(r2),
+            "speed_um_ms": float(1.0 / abs(a)),
+            "span_delay_ms": float(abs(a) * (r.max() - r.min())),
+            "n": int(r.size)}
+
+
 def _window_stats(unit, p):
     """All per-burst fits + the window summary for one Batch.csv unit."""
     dur = float(unit["duration"])
@@ -130,6 +158,7 @@ def _window_stats(unit, p):
     sp64 = [(l, np.asarray(s, float))
             for l, s in zip(unit["labels"], unit["spikes"]) if len(s)]
     tail = float(p["tail_s"])
+    radial = pl._is_radial_group(unit.get("group", ""))
     fits = []
     for (a, b) in events:
         lat = {}
@@ -137,18 +166,32 @@ def _window_stats(unit, p):
             i = int(np.searchsorted(s, a, side="left"))
             if i < s.size and s[i] < b + tail:
                 lat[l] = (s[i] - a) * 1000.0
-        f = _fit_latency_plane(lat, unit["labels"], p["pitch_um"],
-                               int(p["min_lat_electrodes"]),
-                               float(p["min_fit_r2"]))
+        if radial:
+            f = _fit_latency_radial(lat, unit["labels"], p["pitch_um"],
+                                    int(p["min_lat_electrodes"]),
+                                    float(p["min_fit_r2"]))
+        else:
+            f = _fit_latency_plane(lat, unit["labels"], p["pitch_um"],
+                                   int(p["min_lat_electrodes"]),
+                                   float(p["min_fit_r2"]))
         if f is not None:
             f["t_s"] = 0.5 * (a + b)          # event midpoint, window-relative
             fits.append(f)
-    st = {"n_events": len(events), "n_fits": len(fits)}
-    if fits:
+    st = {"n_events": len(events), "n_fits": len(fits),
+          "model": "radial" if radial else "plane"}
+    if fits and radial:
+        corr = np.array([f["corr"] for f in fits])
+        st.update(mean_dir_deg=None, R=None,
+                  alignment=float(corr.mean()),
+                  outward_frac=float((corr > 0).mean()),
+                  median_cv_um_ms=float(np.median([f["speed_um_ms"]
+                                                   for f in fits])),
+                  diag_delay_ms=float(np.median([f["span_delay_ms"]
+                                                 for f in fits])))
+    elif fits:
         th = np.radians([f["theta_deg"] for f in fits])
         Rv = np.exp(1j * th).mean()
         sweep = float(p["sweep_angle_deg"])
-        # corner-to-corner extent of the grid along the sweep axis
         diag = 7 * p["pitch_um"] * (abs(np.cos(np.radians(sweep)))
                                     + abs(np.sin(np.radians(sweep))))
         cv = float(np.median([f["cv_um_ms"] for f in fits]))
@@ -203,6 +246,41 @@ def _rose_panel(ax, fits, st, sweep_deg, min_fits):
                           alpha=0.75))
 
 
+def _radial_hist_panel(ax, fits, st, min_fits):
+    """Radial-group replacement for the direction rose: histogram of each
+    burst's signed latency-radius correlation (+1 = clean outward slope)."""
+    ax.set_facecolor("#FAFAFA")
+    ax.tick_params(labelsize=7, colors="#555")
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    ax.set_xlim(-1.05, 1.05)
+    ax.set_xticks([-1, -0.5, 0, 0.5, 1])
+    ax.axvline(0, color="#CCC", lw=0.8)
+    if not fits:
+        ax.text(0.5, 0.5, "no travelling bursts", ha="center", va="center",
+                fontsize=7.5, color="#888", style="italic",
+                transform=ax.transAxes)
+        ax.set_yticks([])
+        return
+    corr = np.array([f["corr"] for f in fits])
+    ax.hist(corr, bins=np.linspace(-1, 1, 21), color="#B9C6D2",
+            edgecolor="none", zorder=2)
+    ax.axvline(float(corr.mean()), color="black", lw=2.0, zorder=4)
+    ax.axvline(1.0, color="crimson", lw=1.2, ls="--", zorder=3)
+    low = st.get("n_fits", 0) < int(min_fits)
+    ax.text(0.02, 0.98,
+            f"n={st['n_fits']}  outward {100*st.get('outward_frac', 0):.0f}%\n"
+            f"mean corr {st.get('alignment', 0):+.2f}\n"
+            f"radial delay {st.get('diag_delay_ms', float('nan')):.0f} ms"
+            + ("  (few!)" if low else ""),
+            transform=ax.transAxes, ha="left", va="top", fontsize=6.5,
+            color="#B03A2E" if low else "#555",
+            bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none",
+                      alpha=0.75))
+    ax.set_xlabel("latency–radius corr (+1 = outward)", fontsize=7,
+                  color="#555")
+
+
 def _fig_group(group, samples, p, out_dir):
     """samples : [(stem, {region: (stats, fits)}, age), ...]"""
     samples = sorted(samples, key=lambda t: (t[2] if t[2] is not None else 1e9,
@@ -223,22 +301,36 @@ def _fig_group(group, samples, p, out_dir):
     for i, (stem, d, age) in enumerate(samples):
         pl._day_strip(fig.add_subplot(gs[i, 0]), i, nr, stem, age)
         for j, region in enumerate(regions):
-            ax = fig.add_subplot(gs[i, j + 1], polar=True)
+            radial = pl._is_radial_group(group)
+            ax = fig.add_subplot(gs[i, j + 1], polar=not radial)
             st, fits, _win = d.get(region, ({}, [], (0.0, 0.0)))
             try:
-                _rose_panel(ax, fits, st, p["sweep_angle_deg"], p["min_fits"])
+                if radial:
+                    _radial_hist_panel(ax, fits, st, p["min_fits"])
+                else:
+                    _rose_panel(ax, fits, st, p["sweep_angle_deg"],
+                                p["min_fits"])
             except Exception as e:                      # never lose the figure
                 ax.text(0.5, 0.5, f"panel failed\n{e!r}"[:60], fontsize=7,
                         ha="center", va="center", color="crimson",
                         transform=ax.transAxes)
             if i == 0:
                 ax.set_title(region, fontsize=12, fontweight="bold", pad=12)
-    fig.suptitle(
-        f"Network-burst propagation — group {group}   (rows = training "
-        f"days, youngest at top; rose = per-burst latency-plane directions, "
-        f"black arrow = circular mean (length = consistency R), red dashed = "
-        f"sweep {p['sweep_angle_deg']:.0f}°; bursts with plane "
-        f"R² ≥ {p['min_fit_r2']:g})", fontsize=11)
+    if pl._is_radial_group(group):
+        title = (f"Network-burst propagation — group {group}   (rows = "
+                 f"training days, youngest at top; histogram = per-burst "
+                 f"latency–radius correlation from the spiral (centre-out) "
+                 f"ordering, +1 = clean outward slope; black line = mean, red "
+                 f"dashed = outward; fits with R² ≥ "
+                 f"{p['min_fit_r2']:g})")
+    else:
+        title = (f"Network-burst propagation — group {group}   (rows = "
+                 f"training days, youngest at top; rose = per-burst "
+                 f"latency-plane directions, black arrow = circular mean "
+                 f"(length = consistency R), red dashed = sweep "
+                 f"{p['sweep_angle_deg']:.0f}°; bursts with plane "
+                 f"R² ≥ {p['min_fit_r2']:g})")
+    fig.suptitle(title, fontsize=11)
     pl._save(fig, os.path.join(out_dir, f"burst_latency_{group}.png"))
 
 
@@ -264,8 +356,12 @@ def _burst_timecourse(regions, p):
         if not fits:
             continue
         t = np.array([f["t_s"] for f in fits])
-        th = np.array([f["theta_deg"] for f in fits])
-        conv = 50.0 * (1.0 + np.cos(np.radians(th - sweep)))
+        if "corr" in fits[0]:                 # radial model: spiral regression
+            conv = 50.0 * (1.0 + np.array([f["corr"] for f in fits]))
+            th = np.where(conv >= 50.0, 0.0, 180.0)   # outward / inward
+        else:
+            th = np.array([f["theta_deg"] for f in fits])
+            conv = 50.0 * (1.0 + np.cos(np.radians(th - sweep)))
         for f, c in zip(fits, conv):
             events.append({"t_s": t_off + float(f["t_s"]), "convergence_pct":
                            float(c), "r2": float(f["r2"]), "region": region})
@@ -274,7 +370,7 @@ def _burst_timecourse(regions, p):
             n = int(sel.sum())
             if n < 1:
                 continue                      # no travelling burst = no direction
-            Rv = np.exp(1j * np.radians(th[sel])).mean()
+            Rv = np.exp(1j * np.radians(np.asarray(th, float)[sel])).mean()
             bins.append({"t_mid_s": t_off + (b + 0.5) * win_s,
                          "direction_deg": float(np.degrees(np.angle(Rv))),
                          "convergence_pct": float(conv[sel].mean()),
@@ -286,8 +382,10 @@ def _burst_timecourse(regions, p):
     bands.sort(key=lambda x: x[0])
     bins.sort(key=lambda d: d["t_mid_s"])
     events.sort(key=lambda d: d["t_s"])
-    return {"bins": bins, "bands": bands, "window_s": win_s, "mode": "linear",
-            "events": events}
+    radial_any = any(("corr" in f) for (_st, fits, _w) in regions.values()
+                     for f in fits)
+    return {"bins": bins, "bands": bands, "window_s": win_s,
+            "mode": "radial" if radial_any else "linear", "events": events}
 
 
 def _draw_direction_axes_plain(ax, series, p, label_bands=False):
@@ -327,9 +425,13 @@ def _draw_direction_axes_plain(ax, series, p, label_bands=False):
             ax.text(0.5 * (bt0 + bt1) / 60.0, 112.0, str(region),
                     ha="center", va="top", fontsize=8.5, fontweight="bold",
                     color=pl._region_ink(region), zorder=5)
+    radial = (series or {}).get("mode") == "radial"
     ax.axhline(100.0, color="crimson", lw=1.2, ls="--", alpha=0.85, zorder=3)
-    ax.text(t_hi, 100.0, f" sweep {sweep:.0f}°", fontsize=7,
-            color="crimson", va="bottom", ha="right", zorder=5)
+    ax.text(t_hi, 100.0, (" outward" if radial else f" sweep {sweep:.0f}°"),
+            fontsize=7, color="crimson", va="bottom", ha="right", zorder=5)
+    if radial:
+        ax.set_ylabel("outward correlation (50% = none)", fontsize=8.5,
+                      color="#555")
     events = (series or {}).get("events") or []
     if not events:
         ax.text(0.5, 0.5, "no travelling bursts", ha="center", va="center",
@@ -416,12 +518,16 @@ def _fig_group_direction(group, samples, p, out_dir):
                     transform=ax.transAxes)
         if i == nr - 1:
             ax.set_xlabel("session time (min)", fontsize=9, color="#555")
+    if any(s[1] and s[1].get("mode") == "radial" for s in samples):
+        score = ("the spiral latency–radius regression "
+                 "(100% = clean outward slope, 0% = inward)")
+    else:
+        score = f"sweep {float(p['sweep_angle_deg']):.0f}°"
     fig.suptitle(
         f"Burst-travel convergence over time — group {group}   (rows = "
         f"training days, youngest at top; each dot = ONE travelling burst at "
-        f"its actual time, scored on sweep "
-        f"{float(p['sweep_angle_deg']):.0f}°; opacity = that burst's "
-        f"latency-plane R², faint = barely accepted)",
+        f"its actual time, scored on {score}; opacity = that burst's "
+        f"fit R², faint = barely accepted)",
         fontsize=11)
     pl._save(fig, os.path.join(out_dir, f"burst_direction_{group}.png"))
 
@@ -466,12 +572,16 @@ def _fig_direction_means(dir_samples, p, out_dir):
                         transform=ax.transAxes)
             if i == nr - 1:
                 ax.set_xlabel("session time (min)", fontsize=9, color="#555")
+        if pl._is_radial_group(cond):
+            score = ("the spiral latency–radius regression "
+                     "(100% = clean outward slope, 0% = inward)")
+        else:
+            score = f"sweep {float(p['sweep_angle_deg']):.0f}°"
         fig.suptitle(
             f"Burst-travel convergence over time — {cond}, all samples "
             f"pooled   (rows = training days; each dot = ONE travelling burst "
-            f"at its actual time, every replicate overlaid, scored on sweep "
-            f"{float(p['sweep_angle_deg']):.0f}°; opacity = that burst's "
-            f"latency-plane R²)",
+            f"at its actual time, every replicate overlaid, scored on {score}; "
+            f"opacity = that burst's fit R²)",
             fontsize=11)
         pl._save(fig, os.path.join(out_dir,
                                    f"burst_direction_mean_{cond}.png"))
@@ -532,9 +642,9 @@ def _fig_summary(rows, p, out_dir):
 
 def _write_csv(rows, out_dir):
     import csv
-    cols = ["stem", "region", "group", "day", "age", "n_events", "n_fits",
-            "mean_dir_deg", "R", "alignment", "median_cv_um_ms",
-            "diag_delay_ms"]
+    cols = ["stem", "region", "group", "day", "age", "model", "n_events",
+            "n_fits", "mean_dir_deg", "R", "alignment", "outward_frac",
+            "median_cv_um_ms", "diag_delay_ms"]
     path = os.path.join(out_dir, "burst_latency_summary.csv")
     os.makedirs(out_dir, exist_ok=True)
     with open(path, "w", newline="") as fh:
@@ -578,9 +688,15 @@ def run_burst_latency():
         csv_rows.append({"stem": u["stem"], "region": u["region"],
                          "group": u["group"], "day": day, "age": u.get("age"),
                          **st})
-        msg = (f"dir {st['mean_dir_deg']:5.1f}  R {st['R']:.2f}  align "
-               f"{st['alignment']:+.2f}  diag {st['diag_delay_ms']:5.1f} ms"
-               if st.get("R") is not None else "too few travelling bursts")
+        if st.get("R") is not None:
+            msg = (f"dir {st['mean_dir_deg']:5.1f}  R {st['R']:.2f}  align "
+                   f"{st['alignment']:+.2f}  diag {st['diag_delay_ms']:5.1f} ms")
+        elif st.get("alignment") is not None:
+            msg = (f"outward corr {st['alignment']:+.2f}  outward "
+                   f"{100*st['outward_frac']:.0f}%  radial delay "
+                   f"{st['diag_delay_ms']:5.1f} ms")
+        else:
+            msg = "too few travelling bursts"
         io._log(f"  [BurstLat] {u['stem']} [{u['region']}]: "
                 f"{st['n_events']} burst(s), {st['n_fits']} fit(s)  {msg}")
     dir_samples = {}
@@ -627,6 +743,34 @@ def _selftest():
     unit = {"labels": labels,
             "spikes": [np.sort(np.array(spikes[l])) for l in labels],
             "duration": dur}
+    # radial case: bursts whose latency grows with radius must give corr ~ +1
+    cx, cy = pl._RADIAL_CENTRE_CELLS
+    rr = {l: float(np.hypot(pos[l][0] - cx * pitch, pos[l][1] - cy * pitch))
+          for l in labels}
+    rmax = max(rr.values())
+    for outward, want in ((True, 1.0), (False, -1.0)):
+        rs = {l: [] for l in labels}
+        for k in range(40):
+            t0 = 1.0 + k * 1.4
+            for l in labels:
+                lat = (rr[l] / rmax if outward else 1 - rr[l] / rmax) * 0.050
+                for j in range(3):
+                    rs[l].append(t0 + lat + rng.normal(0, 0.002) + j * 0.004)
+        for l in labels:
+            rs[l].extend(rng.uniform(0, dur, int(2 * dur)))
+        runit = {"labels": labels, "group": "radial1",
+                 "spikes": [np.sort(np.array(rs[l])) for l in labels],
+                 "duration": dur}
+        rst, _rf = _window_stats(runit, p)
+        print(f"  radial {'outward' if outward else 'inward '}: mean corr "
+              f"{rst['alignment']:+.2f} (want {want:+.0f}), outward "
+              f"{100*rst['outward_frac']:.0f}%, fits {rst['n_fits']}")
+        # background spikes inside the burst window corrupt a few first-spike
+        # latencies, so the mean |corr| of the planted train is ~0.7, not 1.0;
+        # the outward FRACTION is the robust check.
+        frac_ok = (rst["outward_frac"] > 0.8) if want > 0 else (rst["outward_frac"] < 0.2)
+        assert rst["n_fits"] >= 30 and abs(rst["alignment"] - want) < 0.45 and frac_ok
+
     st, fits = _window_stats(unit, p)
     series = _burst_timecourse({"stim": (st, fits, (0.0, dur))}, p)
     tb = [b["convergence_pct"] for b in series["bins"]]
