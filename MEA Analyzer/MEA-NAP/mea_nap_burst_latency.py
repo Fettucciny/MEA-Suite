@@ -254,7 +254,7 @@ def _burst_timecourse(regions, p):
         return None
     sweep = float(p["sweep_angle_deg"])
     min_n = int(p.get("min_bursts_per_bin", 3))
-    bins, bands = [], []
+    bins, bands, events = [], [], []
     for region, (st, fits, win) in regions.items():
         t_off, t_end = float(win[0]), float(win[1])
         dur = t_end - t_off
@@ -266,6 +266,9 @@ def _burst_timecourse(regions, p):
         t = np.array([f["t_s"] for f in fits])
         th = np.array([f["theta_deg"] for f in fits])
         conv = 50.0 * (1.0 + np.cos(np.radians(th - sweep)))
+        for f, c in zip(fits, conv):
+            events.append({"t_s": t_off + float(f["t_s"]), "convergence_pct":
+                           float(c), "r2": float(f["r2"]), "region": region})
         for b in range(int(np.floor(dur / win_s))):
             sel = (t >= b * win_s) & (t < (b + 1) * win_s)
             n = int(sel.sum())
@@ -282,7 +285,9 @@ def _burst_timecourse(regions, p):
                          "n_locked": n, "region": region})
     bands.sort(key=lambda x: x[0])
     bins.sort(key=lambda d: d["t_mid_s"])
-    return {"bins": bins, "bands": bands, "window_s": win_s, "mode": "linear"}
+    events.sort(key=lambda d: d["t_s"])
+    return {"bins": bins, "bands": bands, "window_s": win_s, "mode": "linear",
+            "events": events}
 
 
 def _draw_direction_axes_plain(ax, series, p, label_bands=False):
@@ -325,35 +330,24 @@ def _draw_direction_axes_plain(ax, series, p, label_bands=False):
     ax.axhline(100.0, color="crimson", lw=1.2, ls="--", alpha=0.85, zorder=3)
     ax.text(t_hi, 100.0, f" sweep {sweep:.0f}°", fontsize=7,
             color="crimson", va="bottom", ha="right", zorder=5)
-    if not bins:
+    events = (series or {}).get("events") or []
+    if not events:
         ax.text(0.5, 0.5, "no travelling bursts", ha="center", va="center",
                 fontsize=9, color="#888", style="italic",
                 transform=ax.transAxes, zorder=6)
         return
-    t = np.array([b["t_mid_s"] for b in bins], float) / 60.0
-    y = np.clip(np.array([b["convergence_pct"] for b in bins], float), 0, 100)
-    weak = np.array([bool(b.get("weak")) for b in bins])
-    win_min = float(series.get("window_s", 60.0)) / 60.0
-    sem = np.array([float(b.get("sem") or 0.0) for b in bins], float)
-    has = np.array([(b.get("sem") is not None) for b in bins])
-    for sel, alpha in ((has & ~weak, 0.9), (has & weak, 0.3)):
-        if sel.any():
-            ax.errorbar(t[sel], y[sel], yerr=sem[sel], fmt="none",
-                        ecolor="#7A8694", elinewidth=1.0, capsize=2.2,
-                        capthick=0.9, alpha=alpha, zorder=4)
-    # raw unsmoothed segments; a segment is faded if either endpoint is weak,
-    # and broken where more than ~1.5 bin widths are missing
-    pts = np.column_stack([t, y]).reshape(-1, 1, 2)
-    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
-    ok = np.diff(t) <= 1.5 * win_min
-    seg_weak = weak[:-1] | weak[1:]
-    for sel, alpha in ((ok & ~seg_weak, 1.0), (ok & seg_weak, 0.28)):
-        if sel.any():
-            lc = pl._LineCollection(segs[sel], colors=[LINE], linewidths=1.6,
-                                    capstyle="round", zorder=5, alpha=alpha)
-            ax.add_collection(lc)
-    if weak.any():
-        ax.plot(t[weak], y[weak], "o", ms=2.6, color=LINE, alpha=0.35, zorder=5)
+    # one dot per burst at its actual time; opacity = that burst's latency-plane
+    # R^2, rescaled from [min_fit_r2, 1] to [0.15, 0.95], so a barely-accepted
+    # fit is faint and a clean plane is solid. No binning, no line.
+    t = np.array([e["t_s"] for e in events], float) / 60.0
+    y = np.clip(np.array([e["convergence_pct"] for e in events], float), 0, 100)
+    r2 = np.array([e["r2"] for e in events], float)
+    r2lo = float(p.get("min_fit_r2", 0.30))
+    a = 0.15 + 0.80 * np.clip((r2 - r2lo) / max(1.0 - r2lo, 1e-9), 0.0, 1.0)
+    base = np.array(LINE, float)
+    cols = np.tile(base, (t.size, 1))
+    cols[:, 3] = a
+    ax.scatter(t, y, s=11, c=cols, edgecolors="none", zorder=5)
 
 
 def _mean_timecourse(members, win_s, min_n):
@@ -424,11 +418,10 @@ def _fig_group_direction(group, samples, p, out_dir):
             ax.set_xlabel("session time (min)", fontsize=9, color="#555")
     fig.suptitle(
         f"Burst-travel convergence over time — group {group}   (rows = "
-        f"training days, youngest at top; each bin = mean convergence of the "
-        f"travelling bursts inside {win_s:g} s on sweep "
-        f"{float(p['sweep_angle_deg']):.0f}°; bars = ±1 SEM across "
-        f"bursts; FADED = bins with < {int(p.get('min_bursts_per_bin', 3))} "
-        f"travelling bursts; gaps = none at all)",
+        f"training days, youngest at top; each dot = ONE travelling burst at "
+        f"its actual time, scored on sweep "
+        f"{float(p['sweep_angle_deg']):.0f}°; opacity = that burst's "
+        f"latency-plane R², faint = barely accepted)",
         fontsize=11)
     pl._save(fig, os.path.join(out_dir, f"burst_direction_{group}.png"))
 
@@ -459,6 +452,9 @@ def _fig_direction_means(dir_samples, p, out_dir):
         for i, day in enumerate(order):
             members = days[day]
             mean = _mean_timecourse([m[0] for m in members], win_s, min_n)
+            mean["events"] = sorted(
+                (e for m in members for e in (m[0].get("events") or [])),
+                key=lambda d: d["t_s"])
             pl._mean_day_strip(fig.add_subplot(gs[i, 0]), i, nr, day,
                                len(members), [m[1] for m in members])
             ax = fig.add_subplot(gs[i, 1])
@@ -471,12 +467,11 @@ def _fig_direction_means(dir_samples, p, out_dir):
             if i == nr - 1:
                 ax.set_xlabel("session time (min)", fontsize=9, color="#555")
         fig.suptitle(
-            f"Burst-travel convergence over time — {cond}, mean of samples"
-            f"   (rows = training days; bars = ±1 SEM across samples; "
-            f"bins of {win_s:g} s, scored on sweep "
-            f"{float(p['sweep_angle_deg']):.0f}°; FADED = fewer than "
-            f"{int(p.get('min_bursts_per_bin', 3))} travelling bursts in the "
-            f"bin across samples; gaps = none at all)",
+            f"Burst-travel convergence over time — {cond}, all samples "
+            f"pooled   (rows = training days; each dot = ONE travelling burst "
+            f"at its actual time, every replicate overlaid, scored on sweep "
+            f"{float(p['sweep_angle_deg']):.0f}°; opacity = that burst's "
+            f"latency-plane R²)",
             fontsize=11)
         pl._save(fig, os.path.join(out_dir,
                                    f"burst_direction_mean_{cond}.png"))
