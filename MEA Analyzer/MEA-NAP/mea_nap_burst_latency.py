@@ -558,6 +558,8 @@ def _fig_direction_means(dir_samples, p, out_dir):
         for i, day in enumerate(order):
             members = days[day]
             mean = _mean_timecourse([m[0] for m in members], win_s, min_n)
+            if any(m[0].get("mode") == "radial" for m in members):
+                mean["mode"] = "radial"       # 100 % tag reads "outward"
             mean["events"] = sorted(
                 (e for m in members for e in (m[0].get("events") or [])),
                 key=lambda d: d["t_s"])
