@@ -15,6 +15,8 @@ every analysis module at start-up, so a broken module = no window (pythonw).
 | `mea_nap_activity.py` | Stage 2: activity, bursts, STTC network, cartography, group comparisons (`run_stage2`, `run_stage2c`) |
 | `mea_nap_original_plots.py` | MEA-NAP MATLAB figure set; also `mcs_coord()` / `_mcs60_labels()` (electrode geometry: x=col, y=9-row) |
 | `mea_nap_phase_lockin.py` | **sweep / radial phase lock-in** — see HANDOFF_2026-10-22.md |
+| `mea_nap_burst_latency.py` | network-burst propagation: latency plane per fast burst, direction vs trained axis ("Burst Latency" section) |
+| `mea_nap_psd_trend.py` | population-rate PSD + burst rate/frequency across training days ("PSD trends" section) |
 | `mea_nap_spkit_egm.py` | SpKit continuous-EGM conduction velocity + slow-sweep latency |
 | `mea_nap_spectral_propagation.py` | burst/laser-locked propagation maps |
 | `mea_nap_digital_events.py` | laser trigger reader (`read_digital_events`, `sweep_metrics`) |
@@ -25,7 +27,7 @@ every analysis module at start-up, so a broken module = no window (pythonw).
 | `dev\` | verification tools (astdiff, compare_figures, check_gui_keys) |
 
 Stages run in a worker thread (`App._worker`): Stage 1 -> Stage 2 -> SpKit ->
-Phase Lock-In, each gated by its section toggle. `App._replot_worker` re-renders
+Phase Lock-In -> Burst Latency -> PSD Trends, each gated by its section toggle. `App._replot_worker` re-renders
 the phase lock-in figures from the results cache without computing.
 
 ## Phase lock-in essentials (details in the handoff)
@@ -50,6 +52,13 @@ the phase lock-in figures from the results cache without computing.
   Changing it needs a run; plot-only keys (`_PLOT_ONLY_KEYS`) only need Replot.
 - Rollback: `Rollback Phase Lock-In to 10_19_26.bat` swaps in the pre-
   vectorisation legacy build; run it again to swap back.
+- `radial_model` ("quadrant" default | "spiral"): spiral reads phase against
+  distance from the ring centre like the linear sweep reads it along the axis
+  (signed k_r matched filter + phase_radius figure). On MEA 100926 the real
+  stim slope is shallow (~0.2-0.65 rad across the array), so the outward
+  CONTRAST sits near 0 even though k_r is + on 15/15 stim windows — the
+  quadrant model is the more sensitive readout there; use the spiral's
+  phase-vs-radius figure as the direct visual.
 - `null_model` ("rotation" default | "position"): the rotation null is driven
   to the p floor by synchrony alone (every pre/post/control window on the Oct
   2026 batch); "position" shuffles electrode positions and is the propagation
