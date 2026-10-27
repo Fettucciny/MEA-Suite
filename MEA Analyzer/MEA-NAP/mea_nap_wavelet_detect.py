@@ -104,6 +104,85 @@ def bandpass(signal, fs, p=DETECT_PARAMS):
                                  p["bp_low_hz"], p["bp_high_hz"])
 
 
+# ==============================================================================
+# BANDPASS, many rows at once  (numba; bit-identical to bandpass() above)
+# ------------------------------------------------------------------------------
+# The lab's filter is butter(3) + scipy filtfilt (odd padding of 3*max(len(a),
+# len(b)), lfilter_zi initial state). _filtfilt_row re-expresses exactly that
+# recipe with scipy's per-sample operation order, in place in one scratch row,
+# so rows filter in parallel without scipy's per-call temporaries and without
+# holding the GIL (the GPU loop runs meanwhile). Falls back to the threaded
+# scipy path when numba is unavailable.
+# ==============================================================================
+try:
+    from numba import njit, prange
+    _HAVE_NUMBA = True
+except Exception:
+    _HAVE_NUMBA = False
+
+if _HAVE_NUMBA:
+    @njit(cache=True, nogil=True)
+    def _filtfilt_row(b, a, zi, padlen, x, ext, out):
+        n = x.shape[0]
+        nz = b.shape[0] - 1
+        m = n + 2 * padlen
+        for i in range(padlen):
+            ext[i] = 2.0 * x[0] - x[padlen - i]
+            ext[n + padlen + i] = 2.0 * x[n - 1] - x[n - 2 - i]
+        for i in range(n):
+            ext[padlen + i] = x[i]
+        z = zi * ext[0]
+        for i in range(m):
+            xi = ext[i]
+            yi = b[0] * xi + z[0]
+            for k in range(nz - 1):
+                z[k] = b[k + 1] * xi + z[k + 1] - a[k + 1] * yi
+            z[nz - 1] = b[nz] * xi - a[nz] * yi
+            ext[i] = yi
+        z = zi * ext[m - 1]
+        for i in range(m - 1, -1, -1):
+            xi = ext[i]
+            yi = b[0] * xi + z[0]
+            for k in range(nz - 1):
+                z[k] = b[k + 1] * xi + z[k + 1] - a[k + 1] * yi
+            z[nz - 1] = b[nz] * xi - a[nz] * yi
+            ext[i] = yi
+        for i in range(n):
+            out[i] = ext[padlen + i]
+
+    @njit(parallel=True, cache=True, nogil=True)
+    def _filtfilt_rows(b, a, zi, padlen, X, out):
+        n = X.shape[1]
+        for r in prange(X.shape[0]):
+            ext = np.empty(n + 2 * padlen)
+            _filtfilt_row(b, a, zi, padlen, X[r], ext, out[r])
+
+
+def _bandpass_coeffs(fs, p=DETECT_PARAMS):
+    """The lab's bandpass_filter design, verbatim (order fixed at 3 there)."""
+    from scipy.signal import butter, lfilter_zi
+    wn = np.array([p["bp_low_hz"], p["bp_high_hz"]]) / (fs / 2.0)
+    wn = np.clip(wn, 1e-6, 1 - 1e-6)
+    b, a = butter(3, wn, btype="bandpass")
+    return b, a, lfilter_zi(b, a), 3 * max(len(a), len(b))
+
+
+def bandpass_rows(X, fs, p=DETECT_PARAMS):
+    """bandpass() applied to every row of a (n_ch, Nt) array, float64 out.
+    Uses the numba kernel when available; otherwise loops bandpass()."""
+    X = np.asarray(X)
+    if X.ndim == 1:
+        X = X[None, :]
+    b, a, zi, padlen = _bandpass_coeffs(fs, p)
+    if not _HAVE_NUMBA or X.shape[1] <= padlen:
+        return np.stack([bandpass(row, fs, p) for row in X])
+    if X.dtype not in (np.float32, np.float64):
+        X = X.astype(np.float64)
+    out = np.empty(X.shape, dtype=np.float64)
+    _filtfilt_rows(b, a, zi, padlen, np.ascontiguousarray(X), out)
+    return out
+
+
 def determine_scales(fs, p=DETECT_PARAMS):
     """CWT scales for the wid_ms range (the lab's determine_scales port)."""
     return _sand._determine_scales(p["wname"], tuple(p["wid_ms"]), fs, p["ns"])
@@ -321,8 +400,9 @@ def detect_spikes_matrix(sigs, fs, p=DETECT_PARAMS, device=None, prefiltered=Fal
 
     `sigs` may be a (n_ch, Nt) array OR any object with .shape and row slicing
     (e.g. MCSFile.matrix_view()) -- channels are pulled in blocks of
-    _CPU_BLOCK_ROWS, converted to float64 and bandpassed in threads, then
-    handed to the GPU in the usual _ch_batch_for batches. The whole-matrix
+    _CPU_BLOCK_ROWS and bandpassed (numba rows, or scipy in threads), one block
+    ahead of the GPU, then handed to the GPU in the usual _ch_batch_for
+    batches. The whole-matrix
     float64 copy the old code made (52 GB for a 60 ch x 90 min file) is gone;
     every per-channel number is computed exactly as before."""
     if isinstance(sigs, np.ndarray) and sigs.ndim == 1:
@@ -344,16 +424,36 @@ def detect_spikes_matrix(sigs, fs, p=DETECT_PARAMS, device=None, prefiltered=Fal
     out = [None] * n_ch
     B = _ch_batch_for(Nt, n_ch, gp)
     rows_per_block = B * max(1, _CPU_BLOCK_ROWS // B)
-    with ThreadPoolExecutor(max_workers=_FILTER_THREADS) as pool:
-        for s0 in range(0, n_ch, rows_per_block):
+    starts = list(range(0, n_ch, rows_per_block))
+
+    def prepare(s0, pool):
+        e0 = min(s0 + rows_per_block, n_ch)
+        if prefiltered:
+            block = np.array(sigs[s0:e0], dtype=float)
+        elif _HAVE_NUMBA:
+            # rows fetched in threads: a lazy view calibrates on access, and
+            # that per-row numpy work releases the GIL
+            raw = np.stack(list(pool.map(lambda j: np.asarray(sigs[j]),
+                                         range(s0, e0))))
+            block = bandpass_rows(raw, fs, p)
+            del raw
+        else:
+            block = np.stack(list(pool.map(
+                lambda j: bandpass(np.asarray(sigs[j], float), fs, p),
+                range(s0, e0))))
+        block -= block.mean(axis=1, keepdims=True)          # detect_spikes_wavelet
+        return block
+
+    # One block of look-ahead: the CPU bandpasses block i+1 while the GPU
+    # works on block i. Blocks are consumed in the original order.
+    with ThreadPoolExecutor(max_workers=_FILTER_THREADS) as pool, \
+            ThreadPoolExecutor(max_workers=1) as ahead:
+        nxt = ahead.submit(prepare, starts[0], pool) if starts else None
+        for bi, s0 in enumerate(starts):
             e0 = min(s0 + rows_per_block, n_ch)
-            if prefiltered:
-                block = np.asarray(sigs[s0:e0], float)
-            else:
-                block = np.stack(list(pool.map(
-                    lambda j: bandpass(np.asarray(sigs[j], float), fs, p),
-                    range(s0, e0))))
-            block = block - block.mean(axis=1, keepdims=True)   # detect_spikes_wavelet
+            block = nxt.result()
+            nxt = (ahead.submit(prepare, starts[bi + 1], pool)
+                   if bi + 1 < len(starts) else None)
             for s in range(s0, e0, B):
                 e = min(s + B, e0)
                 c = _cwt_torch(block[s - s0:e - s0], scales, dev, gp["fp64"])
